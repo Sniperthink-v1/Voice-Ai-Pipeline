@@ -184,13 +184,18 @@ class TurnController:
             # Only cancel if NEW SPEECH is detected (handled in transcript callbacks)
             logger.info("In SPECULATIVE state - continuing to listen for new speech")
 
+        elif current_state == TurnState.COMMITTED:
+            # Continue sending audio to Deepgram during COMMITTED
+            # User might interrupt before TTS starts speaking
+            logger.info("In COMMITTED state - monitoring for user interruption")
+
         elif current_state == TurnState.SPEAKING:
             # Continue sending audio to Deepgram to detect interruptions
             # Only interrupt if NEW SPEECH is detected (handled in transcript callbacks)
             logger.info("In SPEAKING state - monitoring for user interruption")
 
-        # Send audio to Deepgram
-        if self.deepgram and current_state in [TurnState.LISTENING, TurnState.SPECULATIVE, TurnState.SPEAKING]:
+        # Send audio to Deepgram (in all active states)
+        if self.deepgram and current_state in [TurnState.LISTENING, TurnState.SPECULATIVE, TurnState.COMMITTED, TurnState.SPEAKING]:
             logger.info(f"Sending audio to Deepgram in state {current_state}")
             await self.deepgram.send_audio(audio_bytes)
 
@@ -217,6 +222,31 @@ class TurnController:
             logger.info(f"New speech detected during SPECULATIVE: '{text}' - cancelling LLM")
             await self._cancel_speculation()
             await self._transition_to_listening()
+        
+        # If we're in COMMITTED state and get a NEW partial transcript,
+        # user is speaking again → cancel TTS task and transition back to LISTENING
+        elif current_state == TurnState.COMMITTED:
+            logger.info(f"User interrupted during COMMITTED: '{text}' - cancelling TTS task")
+            # Cancel TTS task if running
+            if self._tts_task and not self._tts_task.done():
+                self._tts_cancel_event.set()
+                self._tts_task.cancel()
+                try:
+                    await self._tts_task
+                except asyncio.CancelledError:
+                    pass
+            # Clear sentence queue
+            while not self._sentence_queue.empty():
+                try:
+                    self._sentence_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            # Transition back to LISTENING
+            await self.state_machine.transition(
+                TurnState.LISTENING,
+                reason="User interrupted during COMMITTED"
+            )
+            await self._notify_state_change(TurnState.COMMITTED, TurnState.LISTENING)
         
         # If we're in SPEAKING state and get a NEW partial transcript,
         # it means user is interrupting (barge-in)
