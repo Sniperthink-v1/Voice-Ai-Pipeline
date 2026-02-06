@@ -350,16 +350,28 @@ class TurnController:
             {"role": "user", "content": user_text},
         ]
 
-        # Stream sentences from LLM
+        # Stream sentences from LLM with timeout protection (15s total)
         first_sentence_started = False
         all_sentences = []
         completion_tokens = 0
+        llm_timeout = 15.0  # Maximum time to wait for LLM response
         
         try:
-            async for sentence, is_final in self.openai.stream_sentences(
+            # Wrap the async generator iteration with timeout
+            llm_gen = self.openai.stream_sentences(
                 messages=messages,
                 cancel_event=self._llm_cancel_event,
-            ):
+            )
+            
+            # Use asyncio.wait_for with async for loop workaround
+            start_time = datetime.now()
+            async for sentence, is_final in llm_gen:
+                # Check timeout manually (wait_for doesn't work with async for)
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if elapsed > llm_timeout:
+                    logger.error(f"LLM timeout after {elapsed:.1f}s - aborting")
+                    raise asyncio.TimeoutError("LLM streaming timeout")
+                
                 # Check if cancelled
                 if self._llm_cancel_event.is_set():
                     logger.info("LLM generation was cancelled")
@@ -401,7 +413,12 @@ class TurnController:
 
             # If no sentences were yielded, handle empty response
             if not first_sentence_started:
-                logger.warning("LLM returned no sentences")
+                logger.error("❌ LLM returned no sentences - possible API failure")
+                await self.on_error(
+                    "llm_no_response",
+                    "AI did not generate a response",
+                    recoverable=True
+                )
                 await self._reset_to_idle("Empty LLM response")
                 return
 
@@ -426,10 +443,37 @@ class TurnController:
             if self._tts_task:
                 await self._tts_task
 
-        except Exception as e:
-            logger.error(f"Error in LLM sentence streaming: {e}")
+        except asyncio.TimeoutError:
+            logger.error("❌ LLM streaming timeout (15s) - API not responding")
+            self._llm_cancel_event.set()
+            # Cancel TTS if it was started
             if self._tts_task and not self._tts_task.done():
-                self._tts_task.cancel()
+                self._tts_cancel_event.set()
+                try:
+                    await asyncio.wait_for(self._tts_task, timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            await self.on_error(
+                "llm_timeout",
+                "AI response took too long (15s)",
+                recoverable=True
+            )
+            await self._reset_to_idle("LLM timeout")
+            
+        except Exception as e:
+            logger.error(f"❌ Error in LLM sentence streaming: {e}")
+            # Cancel TTS if running
+            if self._tts_task and not self._tts_task.done():
+                self._tts_cancel_event.set()
+                try:
+                    await asyncio.wait_for(self._tts_task, timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            await self.on_error(
+                "llm_error",
+                f"AI generation failed: {str(e)[:100]}",
+                recoverable=True
+            )
             await self._reset_to_idle(f"LLM error: {e}")
 
     async def _run_tts_streaming(self):
@@ -461,10 +505,20 @@ class TurnController:
                 try:
                     sentence, is_final = await asyncio.wait_for(
                         self._sentence_queue.get(),
-                        timeout=10.0  # Safety timeout
+                        timeout=20.0  # Safety timeout - LLM should complete within 15s
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("TTS queue timeout - completing")
+                    logger.error("❌ TTS queue timeout (20s) - LLM likely stalled or failed")
+                    # If stuck in COMMITTED, transition back to IDLE
+                    current_state = self.state_machine.current_state
+                    if current_state == TurnState.COMMITTED:
+                        logger.error("System stuck in COMMITTED - forcing reset to IDLE")
+                        await self.on_error(
+                            "tts_queue_timeout",
+                            "AI audio generation stalled",
+                            recoverable=True
+                        )
+                        await self._reset_to_idle("TTS queue timeout - LLM stalled")
                     break
                 
                 # Empty sentence with is_final=True signals end
@@ -539,10 +593,21 @@ class TurnController:
                 self._playback_timeout(timeout_s=15.0)
             )
 
+        except asyncio.CancelledError:
+            logger.info("TTS streaming cancelled by user interruption")
+            raise
+            
         except Exception as e:
-            logger.error(f"TTS streaming error: {e}")
-            # Fallback to text-only
-            await self.on_agent_text_fallback(self._llm_response, str(e))
+            logger.error(f"❌ TTS streaming error: {e}")
+            # Notify frontend of audio error
+            await self.on_error(
+                "tts_error",
+                f"Audio generation failed: {str(e)[:100]}",
+                recoverable=True
+            )
+            # Fallback to text-only if we have LLM response
+            if hasattr(self, '_llm_response') and self._llm_response:
+                await self.on_agent_text_fallback(self._llm_response, str(e))
             await self._complete_turn(was_interrupted=False)
 
     async def _run_tts(self):

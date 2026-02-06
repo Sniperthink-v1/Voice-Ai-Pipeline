@@ -210,6 +210,8 @@ class OpenAIClient:
             
             timeout = aiohttp.ClientTimeout(total=30, connect=5)
             
+            logger.info(f"\ud83d\ude80 Starting LLM stream_sentences: model={self.model}, priority={self.use_priority_api}")
+            
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     self.base_url,
@@ -219,8 +221,11 @@ class OpenAIClient:
                     
                     if response.status != 200:
                         error_text = await response.text()
-                        logger.error(f"OpenAI API error {response.status}: {error_text}")
+                        logger.error(f"\u274c OpenAI API error {response.status}: {error_text}")
+                        logger.error(f"   Request: model={self.model}, messages={len(messages)}, priority={self.use_priority_api}")
                         return
+
+                    logger.info(f"\u2705 OpenAI stream_sentences: Connection established (HTTP 200)")
 
                     # Stream tokens and yield sentences
                     async for line in response.content:
@@ -282,8 +287,13 @@ class OpenAIClient:
         except asyncio.CancelledError:
             logger.info("LLM sentence streaming task cancelled")
             return
+        except aiohttp.ClientError as e:
+            logger.error(f"\u274c OpenAI network error: {e}")
+            return
         except Exception as e:
-            logger.error(f"Error during LLM sentence streaming: {e}")
+            logger.error(f"\u274c Error during LLM sentence streaming: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return
 
     async def detect_sentence_boundary(self, text: str) -> bool:
