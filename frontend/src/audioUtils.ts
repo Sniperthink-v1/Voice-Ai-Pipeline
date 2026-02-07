@@ -35,8 +35,17 @@ export class AudioRecorder {
         },
       });
 
-      // Create audio context
-      this.audioContext = new AudioContext({ sampleRate: 16000 });
+      // Create audio context (use webkit prefix for older iOS)
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      this.audioContext = new AudioContextClass({ sampleRate: 16000 });
+      
+      // iOS Safari: AudioContext starts in 'suspended' state, must resume
+      if (this.audioContext.state === 'suspended') {
+        console.log('AudioContext suspended, attempting to resume...');
+        await this.audioContext.resume();
+        console.log('AudioContext resumed:', this.audioContext.state);
+      }
+      
       this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
       // Create script processor for audio data
@@ -288,23 +297,41 @@ export class AudioPlayer {
     console.log(`iOS Audio: Playing ${this.allChunks.length} chunks`);
 
     try {
-      // Concatenate all base64 chunks
-      const combinedBase64 = this.allChunks.join('');
-      console.log(`iOS Audio: Combined base64 length: ${combinedBase64.length}`);
+      // CRITICAL: Decode each base64 chunk separately, then concatenate binary data
+      // (You cannot concatenate base64 strings directly!)
+      const decodedChunks: Uint8Array[] = [];
+      let totalLength = 0;
       
-      // Create blob from base64
-      const binaryString = atob(combinedBase64);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      for (const base64Chunk of this.allChunks) {
+        const binaryString = atob(base64Chunk);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        decodedChunks.push(bytes);
+        totalLength += bytes.length;
       }
       
-      const blob = new Blob([bytes], { type: 'audio/mpeg' });
+      // Combine all decoded chunks into single Uint8Array
+      const combinedBytes = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of decodedChunks) {
+        combinedBytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      
+      console.log(`iOS Audio: Decoded ${decodedChunks.length} chunks, total ${totalLength} bytes`);
+      
+      const blob = new Blob([combinedBytes], { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
       console.log(`iOS Audio: Blob created, size: ${blob.size} bytes`);
       
+      // Create audio element with iOS-friendly attributes
       const audio = new Audio();
       audio.preload = 'auto';
+      // Note: playsinline attribute is for video, but we set it anyway for compatibility
+      audio.setAttribute('playsinline', '');
+      audio.setAttribute('webkit-playsinline', '');
       audio.src = url;
       
       audio.addEventListener('loadedmetadata', () => {
