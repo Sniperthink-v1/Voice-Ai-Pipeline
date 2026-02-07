@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
 
+// Frontend version for deployment tracking
+const VERSION = 'v1.0.2-ios-audio-fix';
+
 interface DebugInfo {
   userAgent: string;
   platform: string;
@@ -257,7 +260,7 @@ export default function DebugPanel({ wsUrl, connectionStatus, currentState, erro
     }}>
       <div style={{ maxWidth: '800px', margin: '0 auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
-          <h2>🐛 Debug Panel</h2>
+          <h2>🐛 Debug Panel <span style={{ fontSize: '14px', color: '#10b981', marginLeft: '10px' }}>({VERSION})</span></h2>
           <button
             onClick={() => setShowDebug(false)}
             style={{

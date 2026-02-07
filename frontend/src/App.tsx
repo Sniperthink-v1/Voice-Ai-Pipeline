@@ -3,6 +3,9 @@ import type { TurnState, ConnectionStatus, ServerMessage } from './types';
 import { AudioRecorder, AudioPlayer, float32ToInt16Base64 } from './audioUtils';
 import DebugPanel from './DebugPanel';
 
+// Frontend version for deployment tracking
+const VERSION = 'v1.0.2-ios-audio-fix';
+
 function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [currentState, setCurrentState] = useState<TurnState>('IDLE');
@@ -349,7 +352,17 @@ function App() {
           marginBottom: '0.5rem',
           color: '#111827',
         }}>
-          Voice AI Pipeline
+          Voice AI Pipeline <span style={{ 
+            fontSize: '0.875rem', 
+            color: '#10b981',
+            fontWeight: '500',
+            backgroundColor: '#d1fae5',
+            padding: '0.25rem 0.5rem',
+            borderRadius: '4px',
+            marginLeft: '0.5rem'
+          }}>
+            {VERSION}
+          </span>
         </h1>
         <p style={{ fontSize: '1rem', color: '#6b7280' }}>
           Real-time voice agent with deterministic state machine
