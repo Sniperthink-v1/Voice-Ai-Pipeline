@@ -111,6 +111,10 @@ class TurnController:
         # Playback tracking
         self._waiting_for_playback = False
         self._playback_timeout_task: Optional[asyncio.Task] = None
+        
+        # SPEAKING state watchdog
+        self._speaking_start_time: Optional[datetime] = None
+        self._speaking_watchdog_task: Optional[asyncio.Task] = None
 
         # Statistics for adaptive behavior
         self._total_turns = 0
@@ -604,6 +608,12 @@ class TurnController:
                             )
                             await self._notify_state_change(TurnState.COMMITTED, TurnState.SPEAKING)
                             logger.info("Transitioned to SPEAKING - ElevenLabs TTS streaming")
+                            
+                            # Start watchdog to detect SPEAKING deadlocks (30s timeout)
+                            self._speaking_start_time = datetime.now()
+                            self._speaking_watchdog_task = asyncio.create_task(
+                                self._speaking_state_watchdog(timeout_s=30.0)
+                            )
                         
                         # Track total latency
                         if self._speech_end_time:
@@ -791,6 +801,11 @@ class TurnController:
         if self._playback_timeout_task and not self._playback_timeout_task.done():
             self._playback_timeout_task.cancel()
             self._playback_timeout_task = None
+        
+        # Cancel SPEAKING watchdog
+        if self._speaking_watchdog_task and not self._speaking_watchdog_task.done():
+            self._speaking_watchdog_task.cancel()
+            self._speaking_watchdog_task = None
 
         # Reset state
         await self._reset_to_idle("Turn complete")
@@ -878,6 +893,51 @@ class TurnController:
                 await self._complete_turn(was_interrupted=False, notify=False)
         except asyncio.CancelledError:
             pass  # Normal cancellation when playback_complete arrives
+
+    async def _speaking_state_watchdog(self, timeout_s: float = 30.0):
+        """
+        Safety watchdog for SPEAKING state deadlocks.
+        
+        If system stays in SPEAKING for longer than timeout without completing,
+        force reset to IDLE. This handles cases where TTS stream stalls or 
+        playback_complete never arrives.
+        
+        Args:
+            timeout_s: Seconds to wait before forcing reset (default 30s)
+        """
+        try:
+            await asyncio.sleep(timeout_s)
+            
+            # Check if still in SPEAKING state
+            current_state = self.state_machine.current_state
+            if current_state == TurnState.SPEAKING:
+                logger.error(f"❌ SPEAKING state watchdog triggered after {timeout_s}s - TTS/playback stalled")
+                
+                # Cancel all TTS operations
+                self._tts_cancel_event.set()
+                if self._tts_task and not self._tts_task.done():
+                    self._tts_task.cancel()
+                    try:
+                        await self._tts_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # Cancel playback timeout
+                if self._playback_timeout_task and not self._playback_timeout_task.done():
+                    self._playback_timeout_task.cancel()
+                
+                # Notify frontend of error
+                await self.on_error(
+                    "speaking_timeout",
+                    "Audio playback stalled - resetting system",
+                    recoverable=True
+                )
+                
+                # Force reset to IDLE
+                await self._reset_to_idle(f"SPEAKING watchdog timeout ({timeout_s}s)")
+                
+        except asyncio.CancelledError:
+            pass  # Normal cancellation when SPEAKING completes
 
     async def _cancel_speculation(self):
         """
