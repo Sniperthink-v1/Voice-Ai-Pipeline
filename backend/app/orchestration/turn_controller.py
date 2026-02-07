@@ -274,6 +274,14 @@ class TurnController:
         """
         current_state = self.state_machine.current_state
 
+        # Handle interruption during SPEAKING state
+        if current_state == TurnState.SPEAKING:
+            # User is speaking during agent playback → barge-in interruption
+            logger.info(f"Final transcript during SPEAKING - triggering interruption: '{text[:50]}'")
+            await self._handle_interrupt()
+            return
+
+        # Ignore transcripts in other non-LISTENING states
         if current_state != TurnState.LISTENING:
             logger.warning(f"Received final transcript in {current_state} state - ignoring")
             return
