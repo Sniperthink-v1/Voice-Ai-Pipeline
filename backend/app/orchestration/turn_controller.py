@@ -277,6 +277,15 @@ class TurnController:
             text: User's text input
         """
         logger.info(f"Text input received: {text}")
+        
+        current_state = self.state_machine.current_state
+        
+        # If in IDLE, transition to LISTENING first (just like voice input does)
+        if current_state == TurnState.IDLE:
+            logger.info("Text input in IDLE state - transitioning to LISTENING")
+            await self._transition_to_listening()
+        
+        # Now process the transcript
         await self._handle_final_transcript(text, confidence=1.0)
 
     async def _handle_final_transcript(self, text: str, confidence: float):
