@@ -15,6 +15,7 @@ from app.config import settings
 from app.websocket import connection_manager
 from app.db.postgres import db
 from app.orchestration.turn_controller import TurnController
+from app.debug_logger import debug_logger
 import time
 
 # Configure logging
@@ -97,6 +98,65 @@ async def health_check() -> JSONResponse:
             "active_sessions": connection_manager.get_session_count(),
         }
     )
+
+
+@app.post("/api/debug/report")
+async def submit_debug_report(request: dict) -> JSONResponse:
+    """
+    Endpoint for clients to submit debug reports.
+    Useful for remote debugging of mobile devices.
+    """
+    try:
+        filename = debug_logger.log_client_report(request)
+        logger.info(f"Debug report saved: {filename}")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message": "Debug report received",
+                "filename": filename,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to save debug report: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(e),
+            }
+        )
+
+
+@app.get("/api/debug/reports")
+async def get_debug_reports(limit: int = 20, ios_only: bool = False) -> JSONResponse:
+    """
+    Get recent debug reports for analysis.
+    """
+    try:
+        if ios_only:
+            reports = debug_logger.get_ios_reports(limit)
+        else:
+            reports = debug_logger.get_recent_reports(limit)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "count": len(reports),
+                "reports": reports,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to retrieve debug reports: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(e),
+            }
+        )
 
 
 @app.websocket("/ws/voice")

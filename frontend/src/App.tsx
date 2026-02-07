@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { TurnState, ConnectionStatus, ServerMessage } from './types';
 import { AudioRecorder, AudioPlayer, float32ToInt16Base64 } from './audioUtils';
+import DebugPanel from './DebugPanel';
 
 function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
@@ -705,6 +706,15 @@ function App() {
       )}
         </ol>
       </div>
+
+      {/* Debug Panel */}
+      <DebugPanel
+        wsUrl={wsUrl}
+        connectionStatus={connectionStatus}
+        currentState={currentState}
+        error={error}
+        logs={logs}
+      />
     </div>
   );
 }

@@ -463,8 +463,14 @@ class TurnController:
                 await self._sentence_queue.put((sentence, is_final))
                 logger.info(f"📤 Queued sentence for TTS: {sentence[:40]}... (is_final={is_final})")
 
-            # If no sentences were yielded, handle empty response
+            # If no sentences were yielded, check if it was cancelled (expected) or failed (error)
             if not first_sentence_started:
+                # If cancelled, this is expected behavior - don't send error to frontend
+                if self._llm_cancel_event.is_set():
+                    logger.info("LLM cancelled before first sentence - no error")
+                    return
+                
+                # Otherwise, it's an actual LLM failure
                 logger.error("❌ LLM returned no sentences - possible API failure")
                 await self.on_error(
                     "llm_no_response",
@@ -553,6 +559,11 @@ class TurnController:
         
         try:
             while not all_sentences_processed:
+                # Check cancel event before waiting on queue
+                if self._tts_cancel_event.is_set():
+                    logger.info("TTS loop cancelled before queue.get()")
+                    break
+                
                 # Get next sentence from queue (with timeout)
                 try:
                     sentence, is_final = await asyncio.wait_for(
@@ -826,12 +837,13 @@ class TurnController:
         # Cancel TTS
         self._tts_cancel_event.set()
         
-        # Cancel TTS task if running
+        # Cancel TTS task if running (with timeout to prevent deadlock)
         if self._tts_task and not self._tts_task.done():
             self._tts_task.cancel()
             try:
-                await self._tts_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._tts_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                logger.warning("TTS task cancellation timed out - forcing completion")
                 pass
         
         # Clear sentence queue

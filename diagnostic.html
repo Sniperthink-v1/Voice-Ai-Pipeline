@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice AI - Quick Diagnostic</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 24px;
+        }
+        p {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        .test-section {
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .test-section h3 {
+            color: #2d3748;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background: #5a67d8;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        button:disabled {
+            background: #cbd5e0;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .result {
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-size: 14px;
+            display: none;
+        }
+        .result.success {
+            background: #c6f6d5;
+            color: #22543d;
+            border-left: 4px solid #38a169;
+            display: block;
+        }
+        .result.error {
+            background: #fed7d7;
+            color: #742a2a;
+            border-left: 4px solid #e53e3e;
+            display: block;
+        }
+        .result.info {
+            background: #bee3f8;
+            color: #2c5282;
+            border-left: 4px solid #3182ce;
+            display: block;
+        }
+        .info-grid {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 10px;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .info-label {
+            font-weight: 600;
+            color: #4a5568;
+        }
+        .info-value {
+            color: #2d3748;
+        }
+        .share-button {
+            background: #48bb78;
+        }
+        .share-button:hover {
+            background: #38a169;
+        }
+        pre {
+            background: #1a202c;
+            color: #68d391;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice AI Quick Diagnostic</h1>
+        <p>Run these tests to help diagnose any issues with the voice agent. Results will be sent to the developer.</p>
+
+        <!-- Device Info -->
+        <div class="test-section">
+            <h3>📱 Device Information</h3>
+            <div id="deviceInfo" class="info-grid"></div>
+        </div>
+
+        <!-- Test 1: Microphone -->
+        <div class="test-section">
+            <h3>🎤 Test 1: Microphone Access</h3>
+            <button onclick="testMicrophone()">Test Microphone</button>
+            <div id="micResult" class="result"></div>
+        </div>
+
+        <!-- Test 2: WebSocket -->
+        <div class="test-section">
+            <h3>🔌 Test 2: WebSocket Connection</h3>
+            <button onclick="testWebSocket()">Test WebSocket</button>
+            <div id="wsResult" class="result"></div>
+        </div>
+
+        <!-- Test 3: Audio Playback -->
+        <div class="test-section">
+            <h3>🔊 Test 3: Audio Playback</h3>
+            <button onclick="testAudio()">Test Audio</button>
+            <div id="audioResult" class="result"></div>
+        </div>
+
+        <!-- Generate Report -->
+        <div class="test-section">
+            <h3>📋 Generate Full Report</h3>
+            <button class="share-button" onclick="generateReport()">Generate & Send Report</button>
+            <div id="reportResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration - UPDATE THESE URLS
+        const BACKEND_URL = 'https://your-backend.railway.app';
+        const WS_URL = 'wss://your-backend.railway.app/ws/voice';
+
+        const testResults = {
+            microphone: null,
+            websocket: null,
+            audio: null,
+        };
+
+        // Display device info on load
+        window.onload = function() {
+            displayDeviceInfo();
+        };
+
+        function displayDeviceInfo() {
+            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+            const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+            
+            const info = {
+                'Device': navigator.platform,
+                'iOS': isIOS ? '✅ Yes' : '❌ No',
+                'Safari': isSafari ? '✅ Yes' : '❌ No',
+                'Screen': `${window.screen.width}x${window.screen.height}`,
+                'User Agent': navigator.userAgent,
+            };
+
+            const container = document.getElementById('deviceInfo');
+            for (const [key, value] of Object.entries(info)) {
+                container.innerHTML += `
+                    <div class="info-label">${key}:</div>
+                    <div class="info-value">${value}</div>
+                `;
+            }
+        }
+
+        async function testMicrophone() {
+            const resultDiv = document.getElementById('micResult');
+            resultDiv.textContent = 'Testing microphone...';
+            resultDiv.className = 'result info';
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(track => track.stop());
+                
+                testResults.microphone = 'success';
+                resultDiv.textContent = '✅ Microphone access granted! Audio input is working.';
+                resultDiv.className = 'result success';
+            } catch (error) {
+                testResults.microphone = 'failed: ' + error.message;
+                resultDiv.textContent = `❌ Microphone test failed: ${error.message}\n\nMake sure you allowed microphone permission when prompted.`;
+                resultDiv.className = 'result error';
+            }
+        }
+
+        async function testWebSocket() {
+            const resultDiv = document.getElementById('wsResult');
+            resultDiv.textContent = 'Connecting to WebSocket...';
+            resultDiv.className = 'result info';
+
+            try {
+                const ws = new WebSocket(WS_URL);
+                
+                await new Promise((resolve, reject) => {
+                    ws.onopen = () => {
+                        testResults.websocket = 'success';
+                        resultDiv.textContent = '✅ WebSocket connection successful! Server is reachable.';
+                        resultDiv.className = 'result success';
+                        ws.close();
+                        resolve();
+                    };
+                    
+                    ws.onerror = (error) => {
+                        testResults.websocket = 'failed: connection error';
+                        resultDiv.textContent = `❌ WebSocket connection failed. Server may be down or URL is incorrect.\n\nURL: ${WS_URL}`;
+                        resultDiv.className = 'result error';
+                        reject(error);
+                    };
+
+                    setTimeout(() => {
+                        testResults.websocket = 'failed: timeout';
+                        resultDiv.textContent = '❌ WebSocket connection timed out after 10 seconds.';
+                        resultDiv.className = 'result error';
+                        ws.close();
+                        reject(new Error('Timeout'));
+                    }, 10000);
+                });
+            } catch (error) {
+                // Error already handled above
+            }
+        }
+
+        async function testAudio() {
+            const resultDiv = document.getElementById('audioResult');
+            resultDiv.textContent = 'Testing audio playback...';
+            resultDiv.className = 'result info';
+
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContext) {
+                    throw new Error('AudioContext not supported');
+                }
+
+                const audioCtx = new AudioContext();
+                
+                // Create a simple beep
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                
+                oscillator.frequency.value = 440; // A note
+                gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + 0.3);
+
+                testResults.audio = 'success';
+                resultDiv.textContent = `✅ Audio playback working! AudioContext state: ${audioCtx.state}\n\nDid you hear a beep sound? If not, check your volume.`;
+                resultDiv.className = 'result success';
+                
+                // Clean up
+                setTimeout(() => {
+                    audioCtx.close();
+                }, 1000);
+            } catch (error) {
+                testResults.audio = 'failed: ' + error.message;
+                resultDiv.textContent = `❌ Audio test failed: ${error.message}`;
+                resultDiv.className = 'result error';
+            }
+        }
+
+        async function generateReport() {
+            const resultDiv = document.getElementById('reportResult');
+            resultDiv.textContent = 'Generating report...';
+            resultDiv.className = 'result info';
+
+            const report = {
+                timestamp: new Date().toISOString(),
+                deviceInfo: {
+                    userAgent: navigator.userAgent,
+                    platform: navigator.platform,
+                    screenSize: `${window.screen.width}x${window.screen.height}`,
+                    isIOS: /iPad|iPhone|iPod/.test(navigator.userAgent),
+                    isSafari: /^((?!chrome|android).)*safari/i.test(navigator.userAgent),
+                },
+                testResults: testResults,
+                currentUrl: window.location.href,
+            };
+
+            // Try to send to backend
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/debug/report`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(report),
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `✅ Report sent successfully!<br><br>The developer has received your diagnostic report.<br><br><strong>Filename:</strong> ${data.filename}`;
+                    resultDiv.className = 'result success';
+                } else {
+                    throw new Error('Server returned error');
+                }
+            } catch (error) {
+                // Fallback: Show report and copy to clipboard
+                const reportText = JSON.stringify(report, null, 2);
+                
+                try {
+                    await navigator.clipboard.writeText(reportText);
+                    resultDiv.innerHTML = `⚠️ Could not send to server, but report was copied to clipboard!<br><br>Please send this to the developer:<pre>${reportText}</pre>`;
+                    resultDiv.className = 'result info';
+                } catch (e) {
+                    resultDiv.innerHTML = `⚠️ Could not send to server. Here's the report to share:<pre>${reportText}</pre>`;
+                    resultDiv.className = 'result info';
+                }
+            }
+        }
+    </script>
+</body>
+</html>
