@@ -992,6 +992,11 @@ class TurnController:
         current = self.state_machine.current_state
         logger.info(f"_transition_to_listening called, current state: {current}")
         
+        # Cancel old playback watchdog from previous turn
+        if self._playback_timeout_task and not self._playback_timeout_task.done():
+            self._playback_timeout_task.cancel()
+            self._playback_timeout_task = None
+        
         if current != TurnState.LISTENING:
             logger.info(f"Attempting transition from {current} to LISTENING")
             await self.state_machine.transition(
@@ -1014,6 +1019,11 @@ class TurnController:
             reason: Reason for reset
         """
         current = self.state_machine.current_state
+        
+        # Cancel playback watchdog
+        if self._playback_timeout_task and not self._playback_timeout_task.done():
+            self._playback_timeout_task.cancel()
+            self._playback_timeout_task = None
         
         if current != TurnState.IDLE:
             await self.state_machine.transition(TurnState.IDLE, reason=reason)
