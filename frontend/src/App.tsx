@@ -33,7 +33,7 @@ function App() {
     if (audioUnlocked) return;
     
     try {
-      // Method 1: Create and resume an AudioContext (required for Web Audio API)
+      // Create and resume an AudioContext (required for Web Audio API)
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       if (audioCtx.state === 'suspended') {
         await audioCtx.resume();
@@ -46,21 +46,18 @@ function App() {
       source.connect(audioCtx.destination);
       source.start(0);
       
-      // Method 2: Also play an audio element (for HTMLAudioElement playback)
-      const audio = new Audio();
-      audio.setAttribute('playsinline', '');
-      audio.setAttribute('webkit-playsinline', '');
-      audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T+FcnLAAAAAAAAAAAAAAAA//sQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV';
-      await audio.play();
-      audio.pause();
-      
       // Close the temporary context to free resources
       audioCtx.close();
       
-      console.log('iOS Audio unlocked successfully (AudioContext + HTMLAudioElement)');
+      // Tell AudioPlayer to unlock HTMLAudioElement playback
+      if (playerRef.current) {
+        await (playerRef.current as any).unlockIOSAudio();
+      }
+      
+      console.log('✅ iOS Audio unlocked successfully');
       setAudioUnlocked(true);
     } catch (e) {
-      console.warn('Audio unlock failed:', e);
+      console.warn('⚠️ Audio unlock failed:', e);
       // Still mark as unlocked to prevent repeated attempts
       setAudioUnlocked(true);
     }

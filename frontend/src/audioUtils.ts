@@ -162,6 +162,7 @@ export class AudioPlayer {
   private audioQueue: HTMLAudioElement[] = [];
   private allChunks: string[] = [];
   private iosAutoPlayTimer: ReturnType<typeof setTimeout> | null = null;
+  private iosUnlockedAudio: HTMLAudioElement | null = null; // Reusable audio element from user gesture
   
   private isPlaying = false;
   private onComplete: (() => void) | null = null;
@@ -173,6 +174,37 @@ export class AudioPlayer {
     
     if (this.useMediaSource) {
       this.initMediaSource();
+    }
+  }
+
+  /**
+   * Unlock iOS audio by creating an audio element during user gesture.
+   * This element can be reused for all subsequent playback.
+   */
+  async unlockIOSAudio(): Promise<void> {
+    if (this.useMediaSource || this.iosUnlockedAudio) return;
+    
+    try {
+      const audio = new Audio();
+      audio.setAttribute('playsinline', '');
+      audio.setAttribute('webkit-playsinline', '');
+      audio.preload = 'auto';
+      // Use a very short silent MP3 (100ms of silence)
+      audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4T+FcnLAAAAAAAAAAAAAAAA//sQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV';
+      
+      // Play and let it complete naturally (don't pause immediately)
+      await audio.play();
+      console.log('🔓 iOS audio element unlocked');
+      
+      // Store this audio element for reuse
+      this.iosUnlockedAudio = audio;
+      
+      // Set up ended handler for reuse
+      audio.addEventListener('ended', () => {
+        console.log('🔄 Unlocked audio ended, ready for reuse');
+      });
+    } catch (e) {
+      console.warn('⚠️ iOS audio unlock failed:', e);
     }
   }
 
@@ -394,20 +426,30 @@ export class AudioPlayer {
       const blob = new Blob([combinedBytes], { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
       
-      const audio = new Audio();
-      audio.preload = 'auto';
-      audio.setAttribute('playsinline', '');
-      audio.setAttribute('webkit-playsinline', '');
-      audio.src = url;
+      // Reuse unlocked audio element if available, otherwise create new one
+      let audio: HTMLAudioElement;
+      if (this.iosUnlockedAudio && this.iosUnlockedAudio.paused) {
+        console.log('♻️ Reusing unlocked audio element');
+        audio = this.iosUnlockedAudio;
+        audio.src = url;
+      } else {
+        console.log('🆕 Creating new audio element');
+        audio = new Audio();
+        audio.preload = 'auto';
+        audio.setAttribute('playsinline', '');
+        audio.setAttribute('webkit-playsinline', '');
+        audio.src = url;
+      }
       this.iosCurrentAudio = audio;
       
+      // Use 'once' option to auto-remove listeners after firing
       audio.addEventListener('ended', () => {
         console.log('🎧 iOS: Batch ended');
         URL.revokeObjectURL(url);
         this.iosCurrentAudio = null;
         // Play next batch if available
         this.playNextIOSBatch();
-      });
+      }, { once: true });
       
       audio.addEventListener('error', () => {
         console.error('🎧 iOS: Audio error', audio.error);
@@ -415,10 +457,13 @@ export class AudioPlayer {
         this.iosCurrentAudio = null;
         // Try to continue with next batch
         this.playNextIOSBatch();
-      });
+      }, { once: true });
       
       await audio.play();
-      this.audioQueue.push(audio);
+      // Don't add reused audio to queue again
+      if (audio !== this.iosUnlockedAudio) {
+        this.audioQueue.push(audio);
+      }
     } catch (e: any) {
       console.error('🎧 iOS: Failed to play batch:', e.message);
       // Try next batch
@@ -451,11 +496,18 @@ export class AudioPlayer {
       // iOS: stop all audio elements
       if (this.iosCurrentAudio) {
         this.iosCurrentAudio.pause();
+        // Reset unlocked audio if it's the one playing
+        if (this.iosCurrentAudio === this.iosUnlockedAudio && this.iosUnlockedAudio) {
+          this.iosUnlockedAudio.currentTime = 0;
+        }
         this.iosCurrentAudio = null;
       }
       this.audioQueue.forEach(audio => {
-        audio.pause();
-        audio.currentTime = 0;
+        // Don't destroy the unlocked audio element
+        if (audio !== this.iosUnlockedAudio) {
+          audio.pause();
+          audio.currentTime = 0;
+        }
       });
       this.audioQueue = [];
       this.allChunks = [];
