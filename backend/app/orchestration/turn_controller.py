@@ -25,6 +25,9 @@ from app.orchestration.transcript_buffer import TranscriptBuffer
 from app.orchestration.conversation_history import ConversationHistory
 from app.orchestration.silence_timer import SilenceTimer
 from app.utils.audio import AudioBuffer, decode_audio_base64
+from app.rag.retriever import RAGRetriever
+from app.rag.vector_store import PineconeVectorStore
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,11 @@ class TurnController:
         # Cancellation control
         self._llm_cancel_event = asyncio.Event()
         self._tts_cancel_event = asyncio.Event()
+
+        # RAG components (initialized lazily)
+        self._rag_retriever: Optional[RAGRetriever] = None
+        self._rag_retrieval_task: Optional[asyncio.Task] = None
+        self._rag_enabled = True  # Can be toggled via settings
 
         # Turn tracking
         self._current_turn_id: Optional[str] = None
@@ -165,18 +173,18 @@ class TurnController:
             return
         
         current_state = self.state_machine.current_state
-        logger.info(f"Received audio: {len(audio_bytes)} bytes, state: {current_state}")
+        logger.debug(f"Received audio: {len(audio_bytes)} bytes, state: {current_state}")
 
         # Add to buffer only when listening to avoid overflow during SPECULATIVE/SPEAKING
         if current_state == TurnState.LISTENING:
             self.audio_buffer.add(audio_bytes)
 
         # State transitions
-        logger.info(f"Current state before transition: {current_state}")
+        logger.debug(f"Current state before transition: {current_state}")
         
         # Log if we have an active Deepgram connection
         deepgram_connected = self.deepgram is not None and hasattr(self.deepgram, 'is_connected') and self.deepgram.is_connected
-        logger.info(f"Deepgram connected: {deepgram_connected}")
+        logger.debug(f"Deepgram connected: {deepgram_connected}")
 
         if current_state == TurnState.IDLE:
             # First audio → start listening
@@ -186,21 +194,21 @@ class TurnController:
         elif current_state == TurnState.SPECULATIVE:
             # Continue sending audio to Deepgram during speculation
             # Only cancel if NEW SPEECH is detected (handled in transcript callbacks)
-            logger.info("In SPECULATIVE state - continuing to listen for new speech")
+            logger.debug("In SPECULATIVE state - continuing to listen for new speech")
 
         elif current_state == TurnState.COMMITTED:
             # Continue sending audio to Deepgram during COMMITTED
             # User might interrupt before TTS starts speaking
-            logger.info("In COMMITTED state - monitoring for user interruption")
+            logger.debug("In COMMITTED state - monitoring for user interruption")
 
         elif current_state == TurnState.SPEAKING:
             # Continue sending audio to Deepgram to detect interruptions
             # Only interrupt if NEW SPEECH is detected (handled in transcript callbacks)
-            logger.info("In SPEAKING state - monitoring for user interruption")
+            logger.debug("In SPEAKING state - monitoring for user interruption")
 
         # Send audio to Deepgram (in all active states)
         if self.deepgram and current_state in [TurnState.LISTENING, TurnState.SPECULATIVE, TurnState.COMMITTED, TurnState.SPEAKING]:
-            logger.info(f"Sending audio to Deepgram in state {current_state}")
+            logger.debug(f"Sending audio to Deepgram in state {current_state}")
             await self.deepgram.send_audio(audio_bytes)
 
     async def _handle_partial_transcript(self, text: str, confidence: float):
@@ -347,6 +355,25 @@ class TurnController:
         self.transcript_buffer.add_final(text, confidence)
         await self.on_transcript_final(text, confidence)
 
+        # Start SPECULATIVE RAG retrieval during debounce (parallel optimization)
+        # Cancel any previous RAG if already running, then start fresh with updated query
+        if self._rag_enabled and self._rag_retriever:
+            # Cancel previous speculative RAG if still running
+            if self._rag_retrieval_task and not self._rag_retrieval_task.done():
+                logger.debug("Cancelling previous speculative RAG (query updated)")
+                self._rag_retrieval_task.cancel()
+                try:
+                    await self._rag_retrieval_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Start fresh RAG with accumulated transcript
+            full_query = self.transcript_buffer.get_final_text()
+            logger.debug(f"🔍 Starting speculative RAG during debounce: {full_query[:50]}")
+            self._rag_retrieval_task = asyncio.create_task(
+                self._retrieve_with_timeout(full_query)
+            )
+        
         # Start silence timer
         self.silence_timer.start()
         logger.debug("Silence timer started after final transcript")
@@ -366,6 +393,18 @@ class TurnController:
         # Mark speech end time
         self._speech_end_time = datetime.now()
         logger.info(f"⏱️ TIMING: User speech ended at {self._speech_end_time.strftime('%H:%M:%S.%f')[:-3]}")
+
+        # RAG already started during debounce (speculative)
+        # If not started yet (edge case), start now
+        if self._rag_enabled and self._rag_retriever:
+            if not self._rag_retrieval_task or self._rag_retrieval_task.done():
+                full_query = self.transcript_buffer.get_final_text()
+                logger.debug(f"Starting RAG (wasn't running): {full_query[:50]}")
+                self._rag_retrieval_task = asyncio.create_task(
+                    self._retrieve_with_timeout(full_query)
+                )
+            else:
+                logger.debug("RAG already running from debounce period (will complete soon)")
 
         # Transition to SPECULATIVE
         await self.state_machine.transition(
@@ -405,6 +444,24 @@ class TurnController:
         if self._speech_end_time:
             silence_delay = (self._llm_start_time - self._speech_end_time).total_seconds() * 1000
             logger.info(f"⏱️ TIMING: LLM started {silence_delay:.0f}ms after speech end")
+        
+        # Wait for RAG retrieval if in progress (should be nearly complete)
+        context_docs = []
+        if self._rag_retrieval_task:
+            try:
+                # Retrieval started ~400ms ago during silence timer, give it remaining time
+                # Use half of configured timeout as safety margin
+                rag_await_timeout = settings.rag_timeout_ms / 1000  # Convert ms to seconds
+                context_docs = await asyncio.wait_for(self._rag_retrieval_task, timeout=rag_await_timeout)
+                if context_docs:
+                    logger.info(f"✅ RAG: Retrieved {len(context_docs)} relevant chunks")
+                else:
+                    logger.info("ℹ️ RAG: No relevant context found")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ RAG retrieval timeout - proceeding without context")
+            except Exception as e:
+                logger.error(f"❌ RAG retrieval error: {e}")
+        
         logger.info(f"Starting LLM sentence streaming: {user_text[:50]}...")
 
         # Clear cancel event and sentence queue
@@ -415,9 +472,10 @@ class TurnController:
             except asyncio.QueueEmpty:
                 break
 
-        # Build messages
+        # Build messages with RAG context
+        system_prompt = self._build_rag_system_prompt(context_docs)
         messages = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": system_prompt},
             *self.conversation_history.get_messages(),
             {"role": "user", "content": user_text},
         ]
@@ -510,12 +568,10 @@ class TurnController:
                 llm_duration = (self._llm_complete_time - self._llm_start_time).total_seconds() * 1000
                 logger.info(f"⏱️ TIMING: LLM completed in {llm_duration:.0f}ms (all sentences generated)")
             
-            # Signal end of sentences if TTS didn't get a final yet
-            # This handles cases where LLM ends without is_final=True
+            # ALWAYS signal end of sentences to TTS task
             if self._tts_task and not self._tts_task.done():
-                # Check if we already sent a final
-                if all_sentences and not all_sentences[-1].endswith(('.', '!', '?')):
-                    await self._sentence_queue.put(("", True))  # Empty final marker
+                logger.debug("Sending final signal to TTS queue")
+                await self._sentence_queue.put(("", True))  # Empty final marker
             
             # Wait for TTS to finish (it handles state transitions)
             if self._tts_task:
@@ -1059,6 +1115,11 @@ class TurnController:
         # Reset turn state
         self._llm_response = ""
         self._turn_start_time = None
+        
+        # Cancel and reset RAG retrieval task
+        if self._rag_retrieval_task and not self._rag_retrieval_task.done():
+            self._rag_retrieval_task.cancel()
+        self._rag_retrieval_task = None
 
     async def _notify_state_change(self, from_state: TurnState, to_state: TurnState):
         """Notify state change via callback."""
@@ -1111,4 +1172,106 @@ class TurnController:
             "total_turns": self._total_turns,
             "tokens_wasted": self._llm_tokens_used["completion"] if self._llm_cancel_event.is_set() else 0,
             "interruption_count": self._cancelled_turns,
+            "rag_enabled": self._rag_enabled,
+            "rag_cache_size": self._rag_retriever.cache_size if self._rag_retriever else 0,
         }
+    
+    def enable_rag(
+        self, 
+        vector_store: PineconeVectorStore, 
+        openai_client=None,
+        local_embedder=None,
+        use_local: bool = True
+    ):
+        """
+        Enable RAG retrieval with provided vector store.
+        
+        Args:
+            vector_store: Pinecone vector store instance
+            openai_client: OpenAI client for embeddings (fallback)
+            local_embedder: Local sentence-transformers embedder (faster)
+            use_local: Use local embeddings if available
+        """
+        self._rag_retriever = RAGRetriever(
+            vector_store=vector_store,
+            local_embedder=local_embedder,
+            openai_client=openai_client,
+            use_local=use_local,
+            top_k=settings.rag_top_k,
+            min_similarity=settings.rag_min_similarity
+        )
+        self._rag_enabled = True
+        embedding_source = "local" if use_local and local_embedder else "OpenAI API"
+        logger.info(f"RAG retrieval enabled (embedding: {embedding_source})")
+    
+    def disable_rag(self):
+        """Disable RAG retrieval."""
+        self._rag_enabled = False
+        logger.info("RAG retrieval disabled")
+    
+    async def _retrieve_with_timeout(self, query: str) -> list:
+        """
+        Retrieve relevant documents with timeout.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            List of relevant document chunks or empty list on timeout/error
+        """
+        if not self._rag_retriever:
+            return []
+        
+        try:
+            results = await self._rag_retriever.retrieve(
+                query=query,
+                session_id=self.session_id,
+                timeout_ms=settings.rag_timeout_ms
+            )
+            return results
+        except Exception as e:
+            logger.error(f"RAG retrieval failed: {e}")
+            return []
+    
+    def _build_rag_system_prompt(self, context_docs: list) -> str:
+        """
+        Build system prompt with RAG context.
+        
+        Args:
+            context_docs: Retrieved document chunks
+            
+        Returns:
+            System prompt with or without context
+        """
+        base_prompt = (
+            "You are a helpful voice assistant. Keep responses concise and natural for speech. "
+            "Use conversation history for context, but answer only the latest user request. "
+            "Do NOT repeat or restate previous assistant replies."
+        )
+        
+        if not context_docs:
+            # No context found - return base prompt
+            return base_prompt
+        
+        # Build context section
+        context_text = "\\n\\n".join([
+            f"[Source: {doc.get('filename', 'unknown')} - Relevance: {doc.get('score', 0):.2f}]\\n{doc.get('text', '')}"
+            for doc in context_docs
+        ])
+        
+        # Augmented prompt with context
+        augmented_prompt = f"""{base_prompt}
+
+You have access to the following relevant information from the user's knowledge base:
+
+{context_text}
+
+Instructions for using this information:
+- Answer the user's question based PRIMARILY on the provided context
+- If the context doesn't contain the answer, clearly say "I don't have that information in your knowledge base"
+- Do NOT make up or hallucinate information not present in the context
+- Cite sources naturally (e.g., "According to your policy document...")
+- Keep responses concise for voice delivery (2-3 sentences max)
+"""
+        
+        return augmented_prompt

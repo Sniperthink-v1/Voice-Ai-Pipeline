@@ -67,15 +67,20 @@ class DeepgramClient:
             logger.warning("Already connected to Deepgram")
             return True
 
-        # Deepgram streaming API configuration
+        # Deepgram nova-3 streaming configuration with multilingual support
+        # nova-3 supports: Indian English (en-IN), Hindi (hi), and 10+ other languages
         params = {
+            "model": "nova-3",
+            "language": "multi",  # Enables multilingual mode (English + Hindi code-switching)
             "encoding": "linear16",
             "sample_rate": 16000,
             "channels": 1,
             "interim_results": "true",
             "punctuate": "true",
+            "smart_format": "true",  # Better number/date formatting
             "utterance_end_ms": 1000,
             "vad_events": "true",
+            "diarize": "false",  # Single speaker assumed
         }
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"wss://api.deepgram.com/v1/listen?{query_string}"

@@ -2,9 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import type { TurnState, ConnectionStatus, ServerMessage } from './types';
 import { AudioRecorder, AudioPlayer, float32ToInt16Base64 } from './audioUtils';
 import DebugPanel from './DebugPanel';
+import DocumentUpload from './DocumentUpload';
 
 // Frontend version for deployment tracking
-const VERSION = 'v1.0.5-debug-logs';
+const VERSION = 'v1.0.6-rag-upload';
 
 function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
@@ -459,6 +460,19 @@ function App() {
           )}
         </div>
       </div>
+
+      {/* Document Upload - Show when connected */}
+      {connectionStatus === 'connected' && sessionId && (
+        <DocumentUpload
+          sessionId={sessionId}
+          onUploadComplete={(doc) => {
+            console.log('Document uploaded:', doc);
+          }}
+          onError={(err) => {
+            setError(err);
+          }}
+        />
+      )}
 
       {/* Voice Controls */}
       {connectionStatus === 'connected' && (

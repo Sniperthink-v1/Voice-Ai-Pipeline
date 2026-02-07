@@ -55,6 +55,60 @@ class Settings(BaseSettings):
         description="ElevenLabs voice ID (default: Rachel)"
     )
 
+    # Pinecone (RAG)
+    pinecone_api_key: str = Field(
+        ...,
+        description="Pinecone API key for vector database"
+    )
+    pinecone_environment: str = Field(
+        default="ap-southeast-1",
+        description="Pinecone environment/region (ap-southeast-1 for Singapore)"
+    )
+    pinecone_index_name: str = Field(
+        default="voice-agent-kb",
+        description="Pinecone index name for knowledge base"
+    )
+    pinecone_dimension: int = Field(
+        default=1536,
+        description="Embedding dimension (1536 for text-embedding-3-small)"
+    )
+
+    # RAG Settings
+    rag_use_local_embeddings: bool = Field(
+        True,
+        description="Use local sentence-transformers (faster) vs OpenAI API"
+    )
+    rag_chunk_size: int = Field(
+        ...,
+        ge=100,
+        le=2000,
+        description="Token size for document chunks"
+    )
+    rag_chunk_overlap: int = Field(
+        ...,
+        ge=0,
+        le=500,
+        description="Token overlap between chunks"
+    )
+    rag_top_k: int = Field(
+        ...,
+        ge=1,
+        le=10,
+        description="Number of chunks to retrieve"
+    )
+    rag_min_similarity: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Minimum similarity score for retrieval"
+    )
+    rag_timeout_ms: int = Field(
+        ...,
+        ge=100,
+        le=10000,
+        description="RAG retrieval timeout in milliseconds"
+    )
+
     # Database
     database_url: str = Field(
         ...,

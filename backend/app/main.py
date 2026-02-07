@@ -6,6 +6,7 @@ Sets up CORS, health check, and WebSocket endpoint.
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+import httpx
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +15,12 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.websocket import connection_manager
 from app.db.postgres import db
+from app.db.models import Session
 from app.orchestration.turn_controller import TurnController
 from app.debug_logger import debug_logger
+from app.api.documents import router as documents_router
 import time
+import uuid
 
 # Configure logging
 logging.basicConfig(
@@ -41,6 +45,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Min silence debounce: {settings.min_silence_debounce_ms}ms")
     logger.info(f"Max silence debounce: {settings.max_silence_debounce_ms}ms")
     logger.info(f"Cancellation threshold: {settings.cancellation_rate_threshold}")
+    logger.info(f"RAG timeout: {settings.rag_timeout_ms}ms (from env)")
+    logger.info(f"RAG settings: top_k={settings.rag_top_k}, min_similarity={settings.rag_min_similarity}")
     
     # Initialize database
     try:
@@ -72,11 +78,14 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "http://localhost:5173"],
+    allow_origins=[settings.frontend_url, "http://localhost:5173", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register API routers
+app.include_router(documents_router)
 
 
 @app.get("/health")
@@ -181,6 +190,26 @@ async def voice_websocket(websocket: WebSocket) -> None:
         session_id = await connection_manager.connect(websocket)
         logger.info(f"New voice session: {session_id}")
         
+        # Create session record in database
+        try:
+            async with db.get_session() as db_session:
+                # Parse session_id as UUID
+                session_uuid = uuid.UUID(session_id)
+                
+                # Create session record
+                session = Session(
+                    id=session_uuid,
+                    total_turns=0,
+                    user_agent=websocket.headers.get("user-agent"),
+                    ip_address=websocket.client.host if websocket.client else None
+                )
+                
+                db_session.add(session)
+                await db_session.commit()
+                logger.info(f"Session record created in database: {session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to create session record: {e} - continuing without DB tracking")
+        
         # Initialize Turn Controller with callbacks
         turn_controller = TurnController(
             session_id=session_id,
@@ -249,6 +278,23 @@ async def voice_websocket(websocket: WebSocket) -> None:
         # Start Turn Controller
         await turn_controller.start()
         logger.info(f"Turn Controller started for session {session_id}")
+        
+        # Initialize RAG if Pinecone is configured
+        try:
+            from app.api.documents import get_vector_store, local_embedder, openai_client as doc_openai_client
+            
+            vector_store = get_vector_store()
+            
+            # Use the embedder already initialized in documents.py
+            turn_controller.enable_rag(
+                vector_store, 
+                openai_client=doc_openai_client,
+                local_embedder=local_embedder,
+                use_local=settings.rag_use_local_embeddings
+            )
+            logger.info(f"RAG enabled for session {session_id}")
+        except Exception as e:
+            logger.warning(f"RAG initialization failed: {e} - continuing without RAG")
         
         # Message handling loop
         while True:
@@ -336,6 +382,17 @@ async def voice_websocket(websocket: WebSocket) -> None:
         # Cleanup session
         if turn_controller:
             await turn_controller.stop()
+        
+        # Delete uploaded embeddings for this session
+        if session_id:
+            try:
+                from app.api.documents import get_vector_store
+                vector_store = get_vector_store()
+                await vector_store.delete_by_session(session_id)
+                logger.info(f"Deleted embeddings for session {session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to delete embeddings for session {session_id}: {e}")
+        
         if session_id:
             await connection_manager.disconnect(session_id)
             logger.info(f"Session {session_id} cleaned up")

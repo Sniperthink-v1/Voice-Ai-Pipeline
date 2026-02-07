@@ -123,3 +123,40 @@ class TelemetryMetric(Base):
     
     def __repr__(self):
         return f"<TelemetryMetric(metric_name={self.metric_name}, value={self.metric_value})>"
+
+
+class Document(Base):
+    """
+    Uploaded document metadata for RAG knowledge base.
+    Stores minimal info for UI display; actual content in Pinecone.
+    """
+    __tablename__ = "documents"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    
+    # File info
+    filename = Column(String(255), nullable=False)
+    file_format = Column(String(10), nullable=False)  # 'pdf', 'txt', 'md'
+    file_size_bytes = Column(Integer, nullable=False)
+    
+    # Processing status
+    status = Column(
+        String(50),
+        nullable=False,
+        default="pending"
+    )  # 'pending', 'processing', 'indexed', 'failed'
+    
+    # Document metrics
+    word_count = Column(Integer, nullable=True)
+    chunk_count = Column(Integer, nullable=True)
+    
+    # Timestamps
+    uploaded_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    indexed_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    
+    # Error tracking
+    error_message = Column(Text, nullable=True)
+    
+    def __repr__(self):
+        return f"<Document(id={self.id}, filename={self.filename}, status={self.status}, chunks={self.chunk_count})>"
