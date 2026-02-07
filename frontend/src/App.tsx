@@ -4,7 +4,7 @@ import { AudioRecorder, AudioPlayer, float32ToInt16Base64 } from './audioUtils';
 import DebugPanel from './DebugPanel';
 
 // Frontend version for deployment tracking
-const VERSION = 'v1.0.3-web-audio-api';
+const VERSION = 'v1.0.4-ios-complete-mp3';
 
 function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
