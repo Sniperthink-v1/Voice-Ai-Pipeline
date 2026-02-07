@@ -161,6 +161,7 @@ export class AudioPlayer {
   // Simple implementation for iOS
   private audioQueue: HTMLAudioElement[] = [];
   private allChunks: string[] = [];
+  private iosAutoPlayTimer: ReturnType<typeof setTimeout> | null = null;
   
   private isPlaying = false;
   private onComplete: (() => void) | null = null;
@@ -241,6 +242,11 @@ export class AudioPlayer {
       });
       this.audioQueue = [];
       this.allChunks = [];
+      // Clear any pending auto-play timer
+      if (this.iosAutoPlayTimer) {
+        clearTimeout(this.iosAutoPlayTimer);
+        this.iosAutoPlayTimer = null;
+      }
     }
   }
 
@@ -275,18 +281,35 @@ export class AudioPlayer {
       // iOS fallback: collect chunks for batch playback
       console.log(`🎧 iOS: Chunk ${this.allChunks.length + 1} collected (${base64Audio.length} chars)`);
       this.allChunks.push(base64Audio);
+      
+      // Auto-play safety: if finalize() isn't called within 3 seconds of first chunk, auto-play
+      if (this.allChunks.length === 1) {
+        console.log('🎧 iOS: Starting 3s auto-play timer');
+        this.iosAutoPlayTimer = setTimeout(() => {
+          if (this.allChunks.length > 0 && !this.isFinalized) {
+            console.log('🎧 iOS: Auto-play timer triggered - finalize was not called!');
+            this.finalize();
+          }
+        }, 3000);
+      }
     }
   }
 
   finalize(): void {
     this.isFinalized = true;
-    console.log(`\ud83c\udfa7 FINALIZE: useMediaSource=${this.useMediaSource}, chunks=${this.allChunks.length}, queue=${this.queue.length}`);
+    console.log(`🎧 FINALIZE: useMediaSource=${this.useMediaSource}, chunks=${this.allChunks.length}, queue=${this.queue.length}`);
+    
+    // Clear auto-play timer if it was set
+    if (this.iosAutoPlayTimer) {
+      clearTimeout(this.iosAutoPlayTimer);
+      this.iosAutoPlayTimer = null;
+    }
     
     if (this.useMediaSource) {
       this.flushQueue();
     } else {
       // iOS: Concatenate all chunks and play as single audio
-      console.log('\ud83c\udfa7 iOS: Starting playIOSAudio()');
+      console.log('🎧 iOS: Starting playIOSAudio()');
       this.playIOSAudio();
     }
   }
