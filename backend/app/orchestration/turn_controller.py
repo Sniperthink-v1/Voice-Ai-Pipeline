@@ -268,6 +268,17 @@ class TurnController:
         self.transcript_buffer.add_partial(text, confidence)
         await self.on_transcript_partial(text, confidence)
 
+    async def handle_text_input(self, text: str):
+        """
+        Handle text input directly (for testing without microphone).
+        Simulates a final transcript from speech.
+        
+        Args:
+            text: User's text input
+        """
+        logger.info(f"Text input received: {text}")
+        await self._handle_final_transcript(text, confidence=1.0)
+
     async def _handle_final_transcript(self, text: str, confidence: float):
         """
         Handle final transcript from Deepgram (LLM input).

@@ -310,7 +310,7 @@ async def voice_websocket(websocket: WebSocket) -> None:
                 text = message_data.get("text", "")
                 if text:
                     logger.info(f"Session {session_id} text input: {text}")
-                    await turn_controller.handle_final_transcript(text, confidence=1.0)
+                    await turn_controller.handle_text_input(text)
             
             elif message_type == "connect":
                 # Client sent connect message - already handled during connection
