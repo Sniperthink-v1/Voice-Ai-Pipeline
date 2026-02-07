@@ -129,19 +129,45 @@ export function float32ToInt16Base64(float32Array: Float32Array): string {
 }
 
 /**
+ * Check if MediaSource API is supported (not available on iOS Safari).
+ */
+function isMediaSourceSupported(): boolean {
+  return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('audio/mpeg');
+}
+
+/**
  * Audio player with queue for streaming playback.
  * Handles base64-encoded audio chunks from backend.
+ * Uses MediaSource API on supported browsers, falls back to simple audio elements on iOS.
  */
 export class AudioPlayer {
+  private useMediaSource: boolean;
+  
+  // MediaSource implementation (Chrome, Firefox, etc.)
   private audioElement: HTMLAudioElement | null = null;
   private mediaSource: MediaSource | null = null;
   private sourceBuffer: SourceBuffer | null = null;
   private queue: Uint8Array[] = [];
+  
+  // Simple implementation for iOS
+  private audioQueue: HTMLAudioElement[] = [];
+  private currentAudioIndex = 0;
+  private allChunks: string[] = [];
+  
   private isPlaying = false;
   private onComplete: (() => void) | null = null;
   private isFinalized = false;
 
   constructor() {
+    this.useMediaSource = isMediaSourceSupported();
+    console.log(`AudioPlayer: Using ${this.useMediaSource ? 'MediaSource API' : 'iOS fallback'}`);
+    
+    if (this.useMediaSource) {
+      this.initMediaSource();
+    }
+  }
+
+  private initMediaSource(): void {
     this.audioElement = new Audio();
     this.audioElement.preload = 'auto';
     this.audioElement.addEventListener('ended', () => {
@@ -157,46 +183,58 @@ export class AudioPlayer {
   resetStream(): void {
     this.isPlaying = false;
     this.isFinalized = false;
-    this.queue = [];
+    
+    if (this.useMediaSource) {
+      this.queue = [];
 
-    if (this.audioElement) {
-      this.audioElement.pause();
-      this.audioElement.currentTime = 0;
-    }
-
-    if (this.sourceBuffer && this.sourceBuffer.updating) {
-      try {
-        this.sourceBuffer.abort();
-      } catch (e) {
-        // ignore
+      if (this.audioElement) {
+        this.audioElement.pause();
+        this.audioElement.currentTime = 0;
       }
-    }
 
-    this.sourceBuffer = null;
-    this.mediaSource = new MediaSource();
-    if (this.audioElement) {
-      this.audioElement.src = URL.createObjectURL(this.mediaSource);
-    }
+      if (this.sourceBuffer && this.sourceBuffer.updating) {
+        try {
+          this.sourceBuffer.abort();
+        } catch (e) {
+          // ignore
+        }
+      }
 
-    this.mediaSource.addEventListener('sourceopen', () => {
-      if (!this.mediaSource) return;
-      try {
-        this.sourceBuffer = this.mediaSource.addSourceBuffer('audio/mpeg');
-        this.sourceBuffer.mode = 'sequence';
-        this.sourceBuffer.addEventListener('updateend', () => {
-          this.flushQueue();
-          if (this.isFinalized && this.queue.length === 0 && this.sourceBuffer && !this.sourceBuffer.updating) {
-            try {
-              this.mediaSource?.endOfStream();
-            } catch (e) {
-              // ignore
+      this.sourceBuffer = null;
+      this.mediaSource = new MediaSource();
+      if (this.audioElement) {
+        this.audioElement.src = URL.createObjectURL(this.mediaSource);
+      }
+
+      this.mediaSource.addEventListener('sourceopen', () => {
+        if (!this.mediaSource) return;
+        try {
+          this.sourceBuffer = this.mediaSource.addSourceBuffer('audio/mpeg');
+          this.sourceBuffer.mode = 'sequence';
+          this.sourceBuffer.addEventListener('updateend', () => {
+            this.flushQueue();
+            if (this.isFinalized && this.queue.length === 0 && this.sourceBuffer && !this.sourceBuffer.updating) {
+              try {
+                this.mediaSource?.endOfStream();
+              } catch (e) {
+                // ignore
+              }
             }
-          }
-        });
-      } catch (e) {
-        console.error('Failed to create SourceBuffer:', e);
-      }
-    });
+          });
+        } catch (e) {
+          console.error('Failed to create SourceBuffer:', e);
+        }
+      });
+    } else {
+      // iOS fallback: clear audio queue
+      this.audioQueue.forEach(audio => {
+        audio.pause();
+        audio.src = '';
+      });
+      this.audioQueue = [];
+      this.currentAudioIndex = 0;
+      this.allChunks = [];
+    }
   }
 
   /**
@@ -204,30 +242,83 @@ export class AudioPlayer {
    * @param base64Audio Base64-encoded audio data (MP3 from ElevenLabs)
    */
   async addChunk(base64Audio: string): Promise<void> {
-    if (!base64Audio || !this.mediaSource) return;
+    if (!base64Audio) return;
 
-    const binaryString = atob(base64Audio);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-
-    this.queue.push(bytes);
-    this.flushQueue();
-
-    if (!this.isPlaying && this.audioElement) {
-      try {
-        await this.audioElement.play();
-        this.isPlaying = true;
-      } catch (e) {
-        console.warn('Audio playback failed to start:', e);
+    if (this.useMediaSource) {
+      if (!this.mediaSource) return;
+      
+      const binaryString = atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
       }
+
+      this.queue.push(bytes);
+      this.flushQueue();
+
+      if (!this.isPlaying && this.audioElement) {
+        try {
+          await this.audioElement.play();
+          this.isPlaying = true;
+        } catch (e) {
+          console.warn('Audio playback failed to start:', e);
+        }
+      }
+    } else {
+      // iOS fallback: collect chunks for batch playback
+      this.allChunks.push(base64Audio);
     }
   }
 
   finalize(): void {
     this.isFinalized = true;
-    this.flushQueue();
+    
+    if (this.useMediaSource) {
+      this.flushQueue();
+    } else {
+      // iOS: Concatenate all chunks and play as single audio
+      this.playIOSAudio();
+    }
+  }
+
+  private async playIOSAudio(): Promise<void> {
+    if (this.allChunks.length === 0) return;
+
+    try {
+      // Concatenate all base64 chunks
+      const combinedBase64 = this.allChunks.join('');
+      
+      // Create blob from base64
+      const binaryString = atob(combinedBase64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      const blob = new Blob([bytes], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      
+      const audio = new Audio(url);
+      audio.addEventListener('ended', () => {
+        URL.revokeObjectURL(url);
+        this.isPlaying = false;
+        if (this.onComplete) {
+          this.onComplete();
+        }
+      });
+      
+      audio.addEventListener('error', (e) => {
+        console.error('iOS audio playback error:', e);
+        URL.revokeObjectURL(url);
+        this.isPlaying = false;
+      });
+      
+      await audio.play();
+      this.isPlaying = true;
+      this.audioQueue.push(audio);
+    } catch (e) {
+      console.error('Failed to play iOS audio:', e);
+    }
   }
 
   private flushQueue(): void {
@@ -249,7 +340,18 @@ export class AudioPlayer {
    * Does NOT trigger onComplete callback.
    */
   stop(): void {
-    this.resetStream();
+    if (this.useMediaSource) {
+      this.resetStream();
+    } else {
+      // iOS: stop all audio elements
+      this.audioQueue.forEach(audio => {
+        audio.pause();
+        audio.currentTime = 0;
+      });
+      this.audioQueue = [];
+      this.allChunks = [];
+      this.isPlaying = false;
+    }
   }
 
   /**
@@ -264,6 +366,6 @@ export class AudioPlayer {
   }
 
   getQueueLength(): number {
-    return this.queue.length;
+    return this.useMediaSource ? this.queue.length : this.allChunks.length;
   }
 }

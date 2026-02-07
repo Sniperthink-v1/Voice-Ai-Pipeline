@@ -78,19 +78,29 @@ export default function DebugPanel({ wsUrl, connectionStatus, currentState, erro
     const originalWarn = console.warn;
 
     console.log = (...args: any[]) => {
-      setDebugLogs(prev => [...prev, `[LOG] ${args.join(' ')}`].slice(-50));
+      setDebugLogs(prev => [...prev, `[LOG] ${new Date().toISOString().substr(11, 12)} - ${args.join(' ')}`].slice(-50));
       originalLog(...args);
     };
 
     console.error = (...args: any[]) => {
-      setDebugLogs(prev => [...prev, `[ERROR] ${args.join(' ')}`].slice(-50));
+      setDebugLogs(prev => [...prev, `[ERROR] ${new Date().toISOString().substr(11, 12)} - ${args.join(' ')}`].slice(-50));
       originalError(...args);
     };
 
     console.warn = (...args: any[]) => {
-      setDebugLogs(prev => [...prev, `[WARN] ${args.join(' ')}`].slice(-50));
+      setDebugLogs(prev => [...prev, `[WARN] ${new Date().toISOString().substr(11, 12)} - ${args.join(' ')}`].slice(-50));
       originalWarn(...args);
     };
+
+    // Capture global errors
+    window.addEventListener('error', (event) => {
+      setDebugLogs(prev => [...prev, `[GLOBAL ERROR] ${event.message} at ${event.filename}:${event.lineno}`].slice(-50));
+    });
+
+    // Capture unhandled promise rejections
+    window.addEventListener('unhandledrejection', (event) => {
+      setDebugLogs(prev => [...prev, `[UNHANDLED REJECTION] ${event.reason}`].slice(-50));
+    });
   };
 
   const generateDebugReport = () => {
