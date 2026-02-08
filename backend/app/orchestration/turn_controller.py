@@ -569,10 +569,11 @@ class TurnController:
                 if not first_sentence_started:
                     first_sentence_started = True
                     
-                    # Track first sentence time
-                    first_sentence_time = datetime.now()
+                    # Track when LLM is ready to start TTS (first sentence ready)
+                    # This is the meaningful "LLM complete" time for sentence streaming
+                    self._llm_complete_time = datetime.now()
                     if self._speech_end_time:
-                        time_to_first = (first_sentence_time - self._speech_end_time).total_seconds() * 1000
+                        time_to_first = (self._llm_complete_time - self._speech_end_time).total_seconds() * 1000
                         logger.info(f"⏱️ TIMING: First sentence ready {time_to_first:.0f}ms after speech end")
                     
                     # Transition SPECULATIVE → COMMITTED
@@ -651,10 +652,10 @@ class TurnController:
             self._llm_response = full_response
             self._llm_tokens_used = {"prompt": 0, "completion": completion_tokens}
             
-            # Track LLM completion time
-            self._llm_complete_time = datetime.now()
-            if self._llm_start_time:
-                llm_duration = (self._llm_complete_time - self._llm_start_time).total_seconds() * 1000
+            # Track when all LLM sentences are done (for logging only)
+            # Note: _llm_complete_time is set when first sentence is ready (for TTS timing)
+            if self._llm_start_time and self._llm_complete_time:
+                llm_duration = (datetime.now() - self._llm_start_time).total_seconds() * 1000
                 logger.info(f"⏱️ TIMING: LLM completed in {llm_duration:.0f}ms (all sentences generated)")
             
             # ALWAYS signal end of sentences to TTS task
