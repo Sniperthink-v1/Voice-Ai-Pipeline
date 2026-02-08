@@ -235,11 +235,11 @@ export default function DocumentSidebar({
   };
 
   return (
-    <aside className="w-80 min-w-0 border-r border-border flex flex-col bg-card overflow-hidden">
+    <aside className="w-full md:w-80 min-w-0 md:border-r border-border flex flex-col bg-card overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-border">
-        <h2 className="text-lg font-semibold">Documents</h2>
-        <p className="text-xs text-muted-foreground mt-1">
+      <div className="p-4 md:p-4 border-b border-border">
+        <h2 className="text-lg md:text-lg font-semibold">Documents</h2>
+        <p className="text-xs md:text-xs text-muted-foreground mt-1">
           {connectionStatus === 'connecting' 
             ? 'Connecting...' 
             : 'Upload a document to start chatting'}
@@ -290,19 +290,19 @@ export default function DocumentSidebar({
       <Separator />
 
       {/* Upload Zone */}
-      <div className="p-4">
+      <div className="p-4 md:p-4">
         {uploading ? (
           <div className="space-y-2">
-            <div className="flex items-center gap-2 text-sm">
-              <Loader2 className="w-4 h-4 animate-spin" />
+            <div className="flex items-center gap-2 text-sm md:text-sm">
+              <Loader2 className="w-4 h-4 md:w-4 md:h-4 animate-spin" />
               <span>{uploadProgress}</span>
             </div>
             <Progress value={uploadPercent} />
-            <p className="text-xs text-muted-foreground text-right">{uploadPercent}%</p>
+            <p className="text-xs md:text-xs text-muted-foreground text-right">{uploadPercent}%</p>
           </div>
         ) : (
           <div
-            className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
+            className={`border-2 border-dashed rounded-lg p-6 md:p-6 text-center transition-colors ${
               isDragging
                 ? 'border-primary bg-primary/10'
                 : 'border-border hover:border-primary/50'
@@ -311,9 +311,9 @@ export default function DocumentSidebar({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
-            <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-            <p className="text-sm font-medium mb-1">Drop file here</p>
-            <p className="text-xs text-muted-foreground mb-3">
+            <Upload className="w-10 h-10 md:w-8 md:h-8 mx-auto mb-2 md:mb-2 text-muted-foreground" />
+            <p className="text-base md:text-sm font-medium mb-1 md:mb-1">Drop file here</p>
+            <p className="text-sm md:text-xs text-muted-foreground mb-3 md:mb-3">
               PDF, TXT, or MD (max 10MB)
             </p>
             <input
@@ -324,9 +324,9 @@ export default function DocumentSidebar({
               className="hidden"
             />
             <Button
-              size="sm"
+              size="lg"
               onClick={() => fileInputRef.current?.click()}
-              className="w-full"
+              className="w-full h-12 md:h-auto text-base md:text-sm"
               disabled={connectionStatus !== 'connected'}
             >
               {connectionStatus === 'connecting' ? 'Connecting...' : 'Upload Document'}

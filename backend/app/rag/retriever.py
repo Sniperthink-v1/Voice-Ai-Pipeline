@@ -8,6 +8,7 @@ from .vector_store import PineconeVectorStore
 from .local_embedder import LocalEmbedder
 import logging
 import asyncio
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,22 @@ class RAGRetriever:
         start_time = datetime.now()
         logger.info(f"📝 _retrieve_internal STARTED: query='{query}' (len={len(query)}), session={session_id[:8]}")
         
+        # Step 0: Rewrite query if needed (commands → semantic queries)
+        original_query = query
+        rewritten_query, is_summary_query = self._rewrite_query_if_needed(query)
+        if rewritten_query != original_query:
+            logger.info(f"🔄 Query rewrite: '{original_query}' → '{rewritten_query}' (summary={is_summary_query})")
+        else:
+            logger.info(f"✓ Query unchanged: '{query}' (summary={is_summary_query})")
+        
+        # Adjust similarity threshold for summary queries
+        adjusted_min_similarity = 0.05 if is_summary_query else self.min_similarity
+        adjusted_top_k = self.top_k * 2 if is_summary_query else self.top_k
+        logger.info(f"📊 Thresholds: min_sim={adjusted_min_similarity}, top_k={adjusted_top_k}")
+        
         # Step 1: Generate query embedding (with caching)
         logger.info("🔄 Step 1: Generating query embedding...")
-        query_embedding = await self._get_query_embedding(query)
+        query_embedding = await self._get_query_embedding(rewritten_query)
         embedding_time = (datetime.now() - start_time).total_seconds() * 1000
         logger.info(f"✅ Embedding generated in {embedding_time:.0f}ms")
         
@@ -115,22 +129,91 @@ class RAGRetriever:
             return []
         
         # Step 2: Search vector database
-        logger.info(f"🔍 Step 2: Searching Pinecone (top_k={self.top_k}, min_sim={self.min_similarity})...")
+        logger.info(f"🔍 Step 2: Searching Pinecone (top_k={adjusted_top_k}, min_sim={adjusted_min_similarity})...")
         search_start = datetime.now()
         results = await self.vector_store.search(
             query_embedding=query_embedding,
             session_id=session_id,
-            top_k=self.top_k,
-            min_score=self.min_similarity
+            top_k=adjusted_top_k,
+            min_score=adjusted_min_similarity
         )
         search_time = (datetime.now() - search_start).total_seconds() * 1000
         total_time = (datetime.now() - start_time).total_seconds() * 1000
+        
+        # Trim results back to original top_k if we fetched more for summary
+        if is_summary_query and len(results) > self.top_k:
+            results = results[:self.top_k]
+            logger.info(f"✂️ Trimmed summary results from {adjusted_top_k} to {self.top_k}")
+        
+        # Log detailed results for debugging
+        if results:
+            logger.info(f"📋 Retrieved {len(results)} chunks:")
+            for i, r in enumerate(results[:3]):  # Log top 3
+                score = r.get('score', 0)
+                text_preview = r.get('text', '')[:80]
+                logger.info(f"  [{i+1}] Score: {score:.3f} | {text_preview}...")
+        else:
+            logger.warning(f"⚠️ No results above threshold {adjusted_min_similarity:.2f} for query: {original_query}")
+        
+        # Attach is_summary_query metadata to results for guardrails
+        for result in results:
+            result['_is_summary_query'] = is_summary_query
+            result['_min_threshold'] = adjusted_min_similarity
         
         logger.info(
             f"📊 RAG complete - Embedding: {embedding_time:.0f}ms, Search: {search_time:.0f}ms, "
             f"Total: {total_time:.0f}ms, Results: {len(results)}"
         )
         return results
+    
+    def _rewrite_query_if_needed(self, query: str) -> tuple[str, bool]:
+        """
+        Transform command-style queries into semantic queries.
+        
+        Args:
+            query: Original user query
+            
+        Returns:
+            Tuple of (rewritten_query, is_summary_query)
+        """
+        query_lower = query.lower().strip()
+        
+        # Pattern 1: Summary/Overview commands
+        summary_patterns = [
+            (r'^(give me |can you |please )?(a |an )?(summary|overview|brief)', 'main topics key points important information'),
+            (r'^summarize (the |this )?(document|file|text|pdf|content)', 'main topics key points important information'),
+            (r'^what (is|are) (the )?(main|key) (points?|topics?|ideas?)', 'main topics key points important information'),
+            (r'^(tell me |show me )?what.s in (the |this )?(document|file)', 'main topics key points important information'),
+        ]
+        
+        for pattern, replacement in summary_patterns:
+            if re.search(pattern, query_lower):
+                return replacement, True
+        
+        # Pattern 2: Remove filler phrases that add no semantic value
+        filler_patterns = [
+            (r'^(tell me about|show me|explain|describe)\s+', ''),
+            (r'^(can you |could you |please |would you )+(tell|show|explain|describe)\s+', ''),
+            (r'\s+(please|thanks|thank you)$', ''),
+        ]
+        
+        rewritten = query_lower
+        modified = False
+        for pattern, replacement in filler_patterns:
+            new_text = re.sub(pattern, replacement, rewritten).strip()
+            if new_text != rewritten:
+                rewritten = new_text
+                modified = True
+        
+        # Pattern 3: Detect if it's a summary query even without rewriting
+        is_summary = any(word in query_lower for word in [
+            'summarize', 'summary', 'overview', 'brief', 'main points', 'key points',
+            'what does it say', 'what is in', 'tell me about the document'
+        ])
+        
+        # Return rewritten query or original if no changes
+        final_query = rewritten if modified else query
+        return final_query, is_summary
     
     async def _get_query_embedding(self, query: str) -> Optional[List[float]]:
         """

@@ -47,6 +47,32 @@
       sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+}
+
+/* Mobile-specific optimizations */
+@media (max-width: 768px) {
+  body {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  
+  /* Ensure buttons are easily tappable (minimum 44px) */
+  button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Prevent zoom on input focus in iOS */
+  input, textarea, select {
+    font-size: 16px !important;
+  }
+  
+  /* Make sure modals are full screen and scrollable */
+  .mobile-modal {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 }
 

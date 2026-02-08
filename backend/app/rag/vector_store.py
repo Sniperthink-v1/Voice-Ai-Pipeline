@@ -150,7 +150,14 @@ class PineconeVectorStore:
         try:
             # Query WITHOUT session filter for MVP (documents accessible across all sessions)
             # TODO: Add proper user authentication and filter by user_id instead
-            logger.debug(f"Querying Pinecone (no session filter for MVP)")
+            logger.info(
+                f"🔍 Pinecone query params: "
+                f"embedding_dim={len(query_embedding)}, "
+                f"top_k={top_k}, "
+                f"min_score={min_score}, "
+                f"session={session_id[:8]}, "
+                f"index={self.index_name}"
+            )
             results = self.index.query(
                 vector=query_embedding,
                 top_k=top_k,

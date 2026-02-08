@@ -5,7 +5,20 @@ import DebugPanel from './DebugPanel';
 import DocumentUpload from './DocumentUpload';
 
 // Frontend version for deployment tracking
-const VERSION = 'v1.0.6-rag-upload';
+const VERSION = 'v1.0.7-mobile-ready';
+
+// Mobile detection hook
+const useIsMobile = () => {
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  
+  return isMobile;
+};
 
 function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
@@ -22,6 +35,11 @@ function App() {
   const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [testMode, setTestMode] = useState(false);
   const [testInput, setTestInput] = useState('');
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [hasUploadedDoc, setHasUploadedDoc] = useState(false);
+  
+  // Mobile detection
+  const isMobile = useIsMobile();
 
   // Refs for audio and WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -97,6 +115,11 @@ function App() {
     ws.onopen = () => {
       console.log('WebSocket connected');
       setConnectionStatus('connected');
+      
+      // Show upload modal after connection if no document uploaded yet
+      if (!hasUploadedDoc) {
+        setTimeout(() => setShowUploadModal(true), 500);
+      }
       
       // Send connect message
       ws.send(JSON.stringify({
@@ -340,19 +363,20 @@ function App() {
 
   return (
     <div style={{ 
-      maxWidth: '900px', 
+      maxWidth: isMobile ? '100%' : '900px', 
       margin: '0 auto', 
-      padding: '2rem',
+      padding: isMobile ? '1rem' : '2rem',
+      minHeight: '100vh',
     }}>
-      <header style={{ marginBottom: '2rem' }}>
+      <header style={{ marginBottom: isMobile ? '1rem' : '2rem' }}>
         <h1 style={{ 
-          fontSize: '2rem', 
+          fontSize: isMobile ? '1.5rem' : '2rem', 
           fontWeight: '700', 
           marginBottom: '0.5rem',
           color: '#111827',
         }}>
           Voice AI Pipeline <span style={{ 
-            fontSize: '0.875rem', 
+            fontSize: isMobile ? '0.75rem' : '0.875rem', 
             color: '#10b981',
             fontWeight: '500',
             backgroundColor: '#d1fae5',
@@ -363,9 +387,11 @@ function App() {
             {VERSION}
           </span>
         </h1>
-        <p style={{ fontSize: '1rem', color: '#6b7280' }}>
-          Real-time voice agent with deterministic state machine
-        </p>
+        {!isMobile && (
+          <p style={{ fontSize: '1rem', color: '#6b7280' }}>
+            Real-time voice agent with deterministic state machine
+          </p>
+        )}
       </header>
 
       {/* Connection Panel */}
@@ -447,12 +473,13 @@ function App() {
               style={{
                 backgroundColor: '#ef4444',
                 color: 'white',
-                padding: '0.5rem 1.5rem',
+                padding: isMobile ? '0.75rem 1.5rem' : '0.5rem 1.5rem',
                 borderRadius: '6px',
                 border: 'none',
-                fontSize: '1rem',
+                fontSize: isMobile ? '1.125rem' : '1rem',
                 fontWeight: '500',
                 cursor: 'pointer',
+                minHeight: isMobile ? '48px' : 'auto',
               }}
             >
               Disconnect
@@ -461,17 +488,126 @@ function App() {
         </div>
       </div>
 
-      {/* Document Upload - Show when connected */}
-      {connectionStatus === 'connected' && sessionId && (
-        <DocumentUpload
-          sessionId={sessionId}
-          onUploadComplete={(doc) => {
-            console.log('Document uploaded:', doc);
-          }}
-          onError={(err) => {
-            setError(err);
-          }}
-        />
+      {/* Document Upload Modal */}
+      {showUploadModal && connectionStatus === 'connected' && sessionId && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: isMobile ? '0' : '1rem',
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: isMobile ? '0' : '12px',
+            width: isMobile ? '100%' : 'min(600px, 90vw)',
+            height: isMobile ? '100%' : 'auto',
+            maxHeight: isMobile ? '100%' : '90vh',
+            overflow: 'auto',
+            position: 'relative',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
+          }}>
+            {/* Close button */}
+            <button
+              onClick={() => setShowUploadModal(false)}
+              style={{
+                position: 'absolute',
+                top: isMobile ? '1rem' : '1.5rem',
+                right: isMobile ? '1rem' : '1.5rem',
+                background: 'transparent',
+                border: 'none',
+                fontSize: '1.5rem',
+                cursor: 'pointer',
+                color: '#6b7280',
+                zIndex: 10,
+                width: '40px',
+                height: '40px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: '50%',
+                transition: 'background-color 0.2s',
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f3f4f6'}
+              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            >
+              ✕
+            </button>
+            
+            {/* Modal Header */}
+            <div style={{
+              padding: isMobile ? '1.5rem 1rem 1rem' : '2rem 2rem 1rem',
+              borderBottom: '1px solid #e5e7eb',
+            }}>
+              <h2 style={{
+                fontSize: isMobile ? '1.25rem' : '1.5rem',
+                fontWeight: '700',
+                color: '#111827',
+                marginBottom: '0.5rem',
+              }}>
+                📄 Upload Knowledge Base
+              </h2>
+              <p style={{
+                fontSize: isMobile ? '0.875rem' : '1rem',
+                color: '#6b7280',
+                lineHeight: '1.5',
+              }}>
+                Upload documents (PDF, TXT, MD) to enhance the AI's knowledge. The agent will use these documents to provide more accurate and contextual responses.
+              </p>
+            </div>
+            
+            {/* Modal Content */}
+            <div style={{
+              padding: isMobile ? '1rem' : '2rem',
+            }}>
+              <DocumentUpload
+                sessionId={sessionId}
+                onUploadComplete={(doc) => {
+                  console.log('Document uploaded:', doc);
+                  setHasUploadedDoc(true);
+                  setTimeout(() => setShowUploadModal(false), 1500);
+                }}
+                onError={(err) => {
+                  setError(err);
+                }}
+              />
+            </div>
+            
+            {/* Skip button for mobile */}
+            {isMobile && (
+              <div style={{
+                padding: '1rem',
+                borderTop: '1px solid #e5e7eb',
+                position: 'sticky',
+                bottom: 0,
+                backgroundColor: 'white',
+              }}>
+                <button
+                  onClick={() => setShowUploadModal(false)}
+                  style={{
+                    width: '100%',
+                    padding: '0.875rem',
+                    fontSize: '1rem',
+                    fontWeight: '600',
+                    color: '#6b7280',
+                    backgroundColor: '#f3f4f6',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Skip for Now
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Voice Controls */}
@@ -555,22 +691,25 @@ function App() {
           ) : (
             // Original voice controls
             <div>
-              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
             {!isRecording ? (
               <button
                 onClick={handleStartRecording}
                 style={{
                   backgroundColor: '#22c55e',
                   color: 'white',
-                  padding: '0.75rem 2rem',
-                  borderRadius: '6px',
+                  padding: isMobile ? '1rem 2rem' : '0.75rem 2rem',
+                  borderRadius: '8px',
                   border: 'none',
-                  fontSize: '1.125rem',
+                  fontSize: isMobile ? '1.25rem' : '1.125rem',
                   fontWeight: '600',
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
+                  justifyContent: 'center',
                   gap: '0.5rem',
+                  width: isMobile ? '100%' : 'auto',
+                  minHeight: isMobile ? '56px' : 'auto',
                 }}
               >
                 🎤 Start Speaking
@@ -582,12 +721,14 @@ function App() {
                   style={{
                     backgroundColor: '#ef4444',
                     color: 'white',
-                    padding: '0.75rem 2rem',
-                    borderRadius: '6px',
+                    padding: isMobile ? '1rem 2rem' : '0.75rem 2rem',
+                    borderRadius: '8px',
                     border: 'none',
-                    fontSize: '1.125rem',
+                    fontSize: isMobile ? '1.25rem' : '1.125rem',
                     fontWeight: '600',
                     cursor: 'pointer',
+                    flex: isMobile ? 1 : 'auto',
+                    minHeight: isMobile ? '56px' : 'auto',
                   }}
                 >
                   ⏹️ Stop
@@ -599,12 +740,14 @@ function App() {
                     style={{
                       backgroundColor: '#f59e0b',
                       color: 'white',
-                      padding: '0.75rem 2rem',
-                      borderRadius: '6px',
+                      padding: isMobile ? '1rem 2rem' : '0.75rem 2rem',
+                      borderRadius: '8px',
                       border: 'none',
-                      fontSize: '1.125rem',
+                      fontSize: isMobile ? '1.25rem' : '1.125rem',
                       fontWeight: '600',
                       cursor: 'pointer',
+                      flex: isMobile ? 1 : 'auto',
+                      minHeight: isMobile ? '56px' : 'auto',
                     }}
                   >
                     ✋ Interrupt
@@ -708,7 +851,36 @@ function App() {
         </div>
       )}
 
-      {/* State Machine Display */}
+      {/* Upload Document Button - Mobile Friendly */}
+      {!isMobile && connectionStatus === 'connected' && (
+        <div style={{
+          marginBottom: '1rem',
+          display: 'flex',
+          justifyContent: 'center',
+        }}>
+          <button
+            onClick={() => setShowUploadModal(true)}
+            style={{
+              backgroundColor: '#8b5cf6',
+              color: 'white',
+              padding: '0.5rem 1.5rem',
+              borderRadius: '6px',
+              border: 'none',
+              fontSize: '0.875rem',
+              fontWeight: '500',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+            }}
+          >
+            📄 {hasUploadedDoc ? 'Upload Another Document' : 'Upload Document'}
+          </button>
+        </div>
+      )}
+
+      {/* State Machine Display - Hidden on Mobile */}
+      {!isMobile && (
       <div style={{
         backgroundColor: '#fafafa',
         border: '1px solid #e5e7eb',
@@ -740,8 +912,10 @@ function App() {
           ))}
         </div>
       </div>
+      )}
 
-      {/* Settings Panel */}
+      {/* Settings Panel - Hidden on Mobile */}
+      {!isMobile && (
       <div style={{
         backgroundColor: '#f3f4f6',
         border: '1px solid #d1d5db',
@@ -813,8 +987,10 @@ function App() {
           </div>
         )}
       </div>
+      )}
 
-      {/* Info Panel */}
+      {/* Info Panel - Hidden on Mobile */}
+      {!isMobile && (
       <div style={{
         backgroundColor: '#eff6ff',
         border: '1px solid #93c5fd',
@@ -833,9 +1009,12 @@ function App() {
           <li>Wait for silence detection (default 400ms, adjustable in Settings) to trigger AI response</li>
           <li>Listen to agent's response or interrupt with "Interrupt" button</li>
           <li>State machine shows current pipeline stage</li>
+        </ol>
+      </div>
+      )}
 
-      {/* Transcript Logs */}
-      {logs.length > 0 && (
+      {/* Transcript Logs - Hidden on Mobile */}
+      {!isMobile && logs.length > 0 && (
         <div style={{
           backgroundColor: '#fafafa',
           border: '1px solid #e5e7eb',
@@ -890,10 +1069,9 @@ function App() {
           </div>
         </div>
       )}
-        </ol>
-      </div>
 
-      {/* Debug Panel */}
+      {/* Debug Panel - Hidden on Mobile */}
+      {!isMobile && (
       <DebugPanel
         wsUrl={wsUrl}
         connectionStatus={connectionStatus}
@@ -901,6 +1079,34 @@ function App() {
         error={error}
         logs={logs}
       />
+      )}
+      
+      {/* Floating Upload Button - Mobile Only */}
+      {isMobile && connectionStatus === 'connected' && (
+        <button
+          onClick={() => setShowUploadModal(true)}
+          style={{
+            position: 'fixed',
+            bottom: '1.5rem',
+            right: '1.5rem',
+            backgroundColor: '#8b5cf6',
+            color: 'white',
+            width: '56px',
+            height: '56px',
+            borderRadius: '50%',
+            border: 'none',
+            fontSize: '1.5rem',
+            cursor: 'pointer',
+            boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          }}
+        >
+          📄
+        </button>
+      )}
     </div>
   );
 }

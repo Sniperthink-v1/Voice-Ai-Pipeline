@@ -276,26 +276,52 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
           margin-bottom: 20px;
         }
 
+        @media (max-width: 768px) {
+          .document-upload {
+            padding: 0;
+            margin-bottom: 0;
+            background: transparent;
+            border: none;
+          }
+        }
+
         .document-upload h3 {
           margin: 0 0 15px 0;
           font-size: 16px;
-          color: #fff;
+          color: #111827;
+        }
+
+        @media (max-width: 768px) {
+          .document-upload h3 {
+            font-size: 18px;
+          }
         }
 
         .document-status {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          background: rgba(0, 255, 0, 0.1);
-          border: 1px solid rgba(0, 255, 0, 0.3);
+          background: #ecfdf5;
+          border: 1px solid #10b981;
           border-radius: 8px;
           padding: 12px;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        @media (max-width: 768px) {
+          .document-status {
+            flex-direction: column;
+            align-items: flex-start;
+          }
         }
 
         .doc-info {
           display: flex;
           align-items: center;
           gap: 12px;
+          flex: 1;
+          min-width: 200px;
         }
 
         .doc-icon {
@@ -308,23 +334,45 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
 
         .doc-name {
           font-weight: 600;
-          color: #fff;
+          color: #111827;
           margin-bottom: 4px;
         }
 
         .doc-meta {
           font-size: 12px;
-          color: rgba(255, 255, 255, 0.6);
+          color: #6b7280;
         }
 
         .doc-actions {
           display: flex;
           gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+          .doc-actions {
+            width: 100%;
+          }
+          
+          .doc-actions button {
+            flex: 1;
+            min-height: 44px;
+          }
         }
 
         .upload-section {
           text-align: center;
           padding: 20px;
+          min-height: 44px;
+        }
+
+        @media (max-width: 768px) {
+          .btn-upload {
+            width: 100%;
+            padding: 16px 24px;
+            font-size: 16px;
+            min-height: 56px;
+          }
         }
 
         .btn-upload {
@@ -346,11 +394,12 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
         .upload-hint {
           margin-top: 8px;
           font-size: 12px;
-          color: rgba(255, 255, 255, 0.5);
+          color: #6b7280;
         }
 
         .file-selected {
-          background: rgba(255, 255, 255, 0.05);
+          background: #f9fafb;
+          border: 1px solid #e5e7eb;
           border-radius: 8px;
           padding: 15px;
         }
@@ -360,7 +409,7 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
           align-items: center;
           gap: 8px;
           margin-bottom: 12px;
-          color: #fff;
+          color: #111827;
         }
 
         .file-icon {
@@ -399,6 +448,18 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
           flex: 1;
           font-size: 13px;
           color: rgba(255, 255, 255, 0.8);
+          flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+          .upload-actions {
+            flex-direction: column;
+          }
+          
+          .upload-actions button {
+            width: 100%;
+            min-height: 48px;
+          }
         }
 
         .setting-row input {
@@ -409,6 +470,15 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
           border-radius: 4px;
           color: #fff;
           font-size: 13px;
+          min-height: 40px;
+        }
+
+        @media (max-width: 768px) {
+          .btn-primary, .btn-secondary, .btn-danger {
+            font-size: 15px;
+            min-height: 48px;
+            padding: 12px 20px;
+          }
         }
 
         .setting-hint {
@@ -439,18 +509,18 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
           flex: 1;
         }
 
-        .btn-secondary {
-          background: rgba(255, 255, 255, 0.1);
-          color: white;
+        .btn-secondary#f3f4f6;
+          color: #374151;
         }
 
         .btn-danger {
-          background: rgba(239, 68, 68, 0.8);
+          background: #ef4444;
           color: white;
         }
 
         .btn-text {
           background: transparent;
+          color: #6b7280
           color: rgba(255, 255, 255, 0.7);
           text-decoration: underline;
           padding: 4px 8px;
@@ -481,13 +551,14 @@ export default function DocumentUpload({ sessionId, onUploadComplete, onError }:
         }
 
         .progress-text {
-          font-size: 14px;
-          color: #fff;
+          font-siz111827;
           margin-bottom: 8px;
+          font-weight: 500;
         }
 
         .progress-hint {
           font-size: 12px;
+          color: #6b7280
           color: rgba(255, 255, 255, 0.5);
         }
       `}</style>

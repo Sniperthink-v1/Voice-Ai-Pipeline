@@ -8,9 +8,25 @@ import DocumentSidebar from './components/DocumentSidebar';
 import ConversationHistory from './components/ConversationHistory';
 import DebugPanel from './components/DebugPanel';
 import { Button } from './components/ui/button';
-import { Mic, MicOff, Hand, Bug } from 'lucide-react';
+import { Mic, MicOff, Hand, Bug, Upload } from 'lucide-react';
+
+// Mobile detection hook
+const useIsMobile = () => {
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  
+  return isMobile;
+};
 
 function App() {
+  // Mobile detection
+  const isMobile = useIsMobile();
+  
   // Connection & State
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [currentState, setCurrentState] = useState<TurnState>('IDLE');
@@ -50,6 +66,10 @@ function App() {
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [debugLogs, setDebugLogs] = useState<{timestamp: Date, type: string, content: string}[]>([]);
   
+  // Mobile upload modal
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [hasUploadedDoc, setHasUploadedDoc] = useState(false);
+  
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<AudioRecorder | null>(null);
@@ -85,6 +105,13 @@ function App() {
   useEffect(() => {
     handleConnect();
   }, []);
+  
+  // Show upload modal after connection on mobile
+  useEffect(() => {
+    if (isMobile && connectionStatus === 'connected' && !hasUploadedDoc && documents.length === 0) {
+      setTimeout(() => setShowUploadModal(true), 500);
+    }
+  }, [isMobile, connectionStatus, hasUploadedDoc, documents.length]);
   
   // Unlock audio on iOS with user interaction
   const unlockAudio = async () => {
@@ -408,6 +435,12 @@ function App() {
   const handleDocumentUploaded = async (doc: Document) => {
     setDocuments(prev => [...prev, doc]);
     setActiveDocumentId(doc.id);
+    setHasUploadedDoc(true);
+    
+    // Close modal on mobile
+    if (isMobile) {
+      setTimeout(() => setShowUploadModal(false), 1000);
+    }
     
     // Auto-connect if not already connected
     if (connectionStatus === 'disconnected') {
@@ -422,7 +455,8 @@ function App() {
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
-      {/* Document Sidebar */}
+      {/* Document Sidebar - Hidden on Mobile */}
+      {!isMobile && (
       <DocumentSidebar
         documents={documents}
         activeDocumentId={activeDocumentId}
@@ -441,16 +475,85 @@ function App() {
           });
         }}
       />
+      )}
+      
+      {/* Mobile Upload Modal */}
+      {isMobile && showUploadModal && (
+        <div
+          className="fixed inset-0 z-50 bg-background"
+          style={{ WebkitOverflowScrolling: 'touch' }}
+        >
+          <div className="flex flex-col h-full">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <div>
+                <h2 className="text-xl font-bold">Upload Document</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Upload a document to start chatting
+                </p>
+              </div>
+              {hasUploadedDoc && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowUploadModal(false)}
+                  className="text-muted-foreground"
+                >
+                  Close
+                </Button>
+              )}
+            </div>
+            
+            {/* Document Sidebar Content */}
+            <div className="flex-1 overflow-auto">
+              <DocumentSidebar
+                documents={documents}
+                activeDocumentId={activeDocumentId}
+                sessionId={sessionId}
+                connectionStatus={connectionStatus}
+                apiUrl={apiUrl}
+                onDocumentUploaded={handleDocumentUploaded}
+                onDocumentSelect={setActiveDocumentId}
+                onConnect={handleConnect}
+                onError={(msg) => {
+                  setError(msg);
+                  toast({
+                    variant: "destructive",
+                    title: "Error",
+                    description: msg,
+                  });
+                }}
+              />
+            </div>
+            
+            {/* Skip Button */}
+            {!hasUploadedDoc && (
+              <div className="p-4 border-t border-border">
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  size="lg"
+                  onClick={() => setShowUploadModal(false)}
+                >
+                  Skip for Now
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col">
         {/* Header */}
-        <header className="border-b border-border p-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Talk with your document</h1>
-            <p className="text-sm text-muted-foreground">
-              Upload a document and have a conversation about it
-            </p>
+        <header className={`border-b border-border p-4 flex items-center justify-between ${isMobile ? 'flex-col gap-3' : ''}`}>
+          <div className={isMobile ? 'text-center' : ''}>
+            <h1 className={`font-bold ${isMobile ? 'text-xl' : 'text-2xl'}`}>Talk with your document</h1>
+            {!isMobile && (
+              <p className="text-sm text-muted-foreground">
+                Upload a document and have a conversation about it
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <div className={`px-3 py-1 rounded-full text-xs font-medium ${
@@ -505,7 +608,7 @@ function App() {
 
           {/* Control Buttons - only show when ball is in container */}
           {!isBallFloating && (
-            <div className="flex items-center gap-4 mt-4 flex-shrink-0 pb-4">
+            <div className={`flex items-center gap-4 mt-4 flex-shrink-0 pb-4 ${isMobile ? 'flex-col w-full px-4' : ''}`}>
             {!isRecording ? (
               <Button
                 size="lg"
@@ -515,49 +618,50 @@ function App() {
                   documents.length === 0 ||
                   !documents.some(d => d.status === 'indexed')
                 }
-                className="gap-2"
+                className={`gap-2 ${isMobile ? 'w-full h-14 text-base' : ''}`}
               >
                 <Mic className="w-5 h-5" />
                 Start Speaking
               </Button>
             ) : (
+              <>
               <Button
                 size="lg"
                 variant="destructive"
                 onClick={handleStopRecording}
-                className="gap-2"
+                className={`gap-2 ${isMobile ? 'w-full h-14 text-base' : ''}`}
               >
                 <MicOff className="w-5 h-5" />
                 Stop Speaking
               </Button>
-            )}
             
             {currentState === 'SPEAKING' && (
               <Button
                 size="lg"
                 variant="outline"
                 onClick={handleInterrupt}
-                className="gap-2"
+                className={`gap-2 ${isMobile ? 'w-full h-14 text-base' : ''}`}
               >
                 <Hand className="w-5 h-5" />
                 Interrupt
               </Button>
+            )}
+            </>
             )}
           </div>
           )}
 
           {/* Error Display */}
           {error && !isBallFloating && (
-            <div className="bg-destructive/10 border border-destructive text-destructive rounded-lg p-4 max-w-md mt-4">
+            <div className={`bg-destructive/10 border border-destructive text-destructive rounded-lg p-4 mt-4 ${isMobile ? 'mx-4 text-sm' : 'max-w-md'}`}>
               <strong>Error:</strong> {error}
             </div>
           )}
         </div>
 
         {/* Floating Controls Bar - appears when ball is floating */}
-        {isBallFloating && (
-          <div className="flex items-center justify-center gap-4 px-8 py-3 border-b border-border bg-card/50">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {isBallFloating && !isMobile && (
+          <div className="flex items-center justify-center gap-4 px-8 py-3 border-b border-border bg-card/50 flex-wrap">\n            <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span>{getStatusIcon()}</span>
               <span>{getStatusText()}</span>
             </div>
@@ -605,6 +709,63 @@ function App() {
           </div>
         )}
 
+        {/* Mobile Floating Controls Bar - appears when ball is floating on mobile */}
+        {isBallFloating && isMobile && (
+          <div className="flex flex-col gap-2 px-4 py-3 border-b border-border bg-card">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <span>{getStatusIcon()}</span>
+                <span>{getStatusText()}</span>
+              </div>
+              {partialTranscript && (
+                <p className="text-xs text-muted-foreground italic truncate max-w-[180px]">
+                  {partialTranscript}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center gap-2 w-full">
+              {!isRecording ? (
+                <Button
+                  size="sm"
+                  onClick={handleStartRecording}
+                  disabled={
+                    connectionStatus !== 'connected' ||
+                    documents.length === 0 ||
+                    !documents.some(d => d.status === 'indexed')
+                  }
+                  className="gap-1 flex-1 h-12"
+                >
+                  <Mic className="w-4 h-4" />
+                  Speak
+                </Button>
+              ) : (
+                <>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={handleStopRecording}
+                  className="gap-1 flex-1 h-12"
+                >
+                  <MicOff className="w-4 h-4" />
+                  Stop
+                </Button>
+                {currentState === 'SPEAKING' && (
+                  <Button size="sm" variant="outline" onClick={handleInterrupt} className="gap-1 flex-1 h-12">
+                    <Hand className="w-4 h-4" />
+                    Stop AI
+                  </Button>
+                )}
+                </>
+              )}
+            </div>
+            {error && (
+              <div className="text-xs text-destructive bg-destructive/10 p-2 rounded">
+                {error}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Conversation History - grows as ball container shrinks */}
         <div
           className={`min-h-0 border-t border-border flex flex-col overflow-hidden transition-all duration-500 ease-in-out ${
@@ -618,7 +779,21 @@ function App() {
         </div>
       </main>
 
+      {/* Floating Upload Button - Mobile Only */}
+      {isMobile && !showUploadModal && (
+        <div className="fixed bottom-20 right-4 z-40">
+          <Button
+            size="icon"
+            onClick={() => setShowUploadModal(true)}
+            className="rounded-full shadow-lg h-14 w-14"
+          >
+            <Upload className="w-6 h-6" />
+          </Button>
+        </div>
+      )}
+      
       {/* Floating Debug Button */}
+      {!isMobile && (
       <div className="fixed bottom-4 right-4 z-50">
         <Button
           variant="outline"
@@ -629,6 +804,7 @@ function App() {
           <Bug className="w-5 h-5" />
         </Button>
       </div>
+      )}
 
       {/* Debug Panel */}
       {showDebugPanel && (

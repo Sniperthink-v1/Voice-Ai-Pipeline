@@ -27,6 +27,7 @@ from app.orchestration.silence_timer import SilenceTimer
 from app.utils.audio import AudioBuffer, decode_audio_base64
 from app.rag.retriever import RAGRetriever
 from app.rag.vector_store import PineconeVectorStore
+from app.rag.guardrails import RAGGuardrails, GuardrailViolation
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,12 @@ class TurnController:
         self._rag_retriever: Optional[RAGRetriever] = None
         self._rag_retrieval_task: Optional[asyncio.Task] = None
         self._rag_enabled = True  # Can be toggled via settings
+        self._rag_guardrails = RAGGuardrails(
+            enable_pii_detection=True,
+            enable_prompt_injection_detection=True,
+            enable_harmful_content_detection=True,
+            min_confidence_threshold=0.3
+        )
 
         # Turn tracking
         self._current_turn_id: Optional[str] = None
@@ -135,7 +142,7 @@ class TurnController:
         logger.info(f"TurnController initialized for session {session_id}")
 
     async def start(self):
-        """Initialize external connections."""
+        """Initialize external connections and pre-warm OpenAI."""
         # Connect to Deepgram
         self.deepgram = DeepgramClient(
             on_partial_transcript=self._handle_partial_transcript,
@@ -146,13 +153,35 @@ class TurnController:
         success = await self.deepgram.connect()
         if not success:
             await self.on_error("DEEPGRAM_CONNECTION_FAILED", "Failed to connect to Deepgram", recoverable=True)
-            
-        logger.info("TurnController started")
+        
+        # Pre-warm OpenAI connection (establish HTTP pool before first LLM call)
+        # This eliminates 500-1000ms connection delay on first response
+        logger.info("🔥 Pre-warming OpenAI connection...")
+        try:
+            await self.openai._warm_up_connection()
+            logger.info("✅ OpenAI connection pre-warmed and ready")
+        except Exception as e:
+            logger.warning(f"⚠️ OpenAI pre-warm failed (non-critical): {e}")
+        
+        # Pre-warm ElevenLabs connection (establish HTTP pool before first TTS call)
+        # This eliminates 200-250ms connection delay on first TTS request
+        logger.info("🔥 Pre-warming ElevenLabs connection...")
+        try:
+            await self.elevenlabs._warm_up_connection()
+            logger.info("✅ ElevenLabs connection pre-warmed and ready")
+        except Exception as e:
+            logger.warning(f"⚠️ ElevenLabs pre-warm failed (non-critical): {e}")
 
     async def stop(self):
         """Cleanup and disconnect."""
         if self.deepgram:
             await self.deepgram.disconnect()
+        
+        # Close persistent OpenAI session
+        await self.openai.close()
+        
+        # Close persistent ElevenLabs session
+        await self.elevenlabs.close()
         
         self.silence_timer.cancel()
         logger.info("TurnController stopped")
@@ -263,6 +292,9 @@ class TurnController:
             
             # Unlock transcript buffer so new speech can be captured
             self.transcript_buffer.unlock()
+            # Clear buffer to start fresh (prevent text accumulation from previous turn)
+            self.transcript_buffer.clear()
+            logger.info("🧹 Cleared transcript buffer after COMMITTED interrupt")
             
             # Start new turn immediately since user is speaking
             await self._transition_to_listening()
@@ -399,7 +431,13 @@ class TurnController:
         if self._rag_enabled and self._rag_retriever:
             if not self._rag_retrieval_task or self._rag_retrieval_task.done():
                 full_query = self.transcript_buffer.get_final_text()
-                logger.debug(f"Starting RAG (wasn't running): {full_query[:50]}")
+                if self._rag_retrieval_task and self._rag_retrieval_task.done():
+                    logger.warning(
+                        f"⚠️ Speculative RAG already completed (likely returned 0 results) "
+                        f"- starting fresh RAG call"
+                    )
+                else:
+                    logger.debug(f"Starting RAG (wasn't running): {full_query[:50]}")
                 self._rag_retrieval_task = asyncio.create_task(
                     self._retrieve_with_timeout(full_query)
                 )
@@ -559,7 +597,45 @@ class TurnController:
                 return
 
             # Store full response for conversation history
-            self._llm_response = ' '.join(all_sentences)
+            full_response = ' '.join(all_sentences)
+            
+            # Guardrail: Validate LLM response before sending to user
+            # Build context string for grounding check
+            context_str = "\n".join([doc.get('text', '') for doc in context_docs]) if context_docs else ""
+            response_validation = self._rag_guardrails.validate_response(
+                response=full_response,
+                context=context_str,
+                query=user_text
+            )
+            
+            if not response_validation.passed:
+                logger.warning(f"🛡️ Response blocked by guardrails: {response_validation.violation}")
+                # Use safe fallback instead
+                full_response = self._rag_guardrails.create_safe_fallback_response(
+                    response_validation.violation
+                )
+                # Update all_sentences to reflect fallback
+                all_sentences = [full_response]
+            elif response_validation.sanitized_text:
+                # PII was redacted - use sanitized version
+                logger.info(f"🔒 PII redacted from response: {response_validation.reason}")
+                full_response = response_validation.sanitized_text
+                all_sentences = [full_response]
+            
+            # Optional: Check context grounding (log only, don't block)
+            if context_str:
+                is_grounded, overlap_score = self._rag_guardrails.check_context_grounding(
+                    response=full_response,
+                    context=context_str,
+                    threshold=0.3
+                )
+                if not is_grounded:
+                    logger.warning(
+                        f"⚠️ Response may not be well-grounded in context "
+                        f"(overlap: {overlap_score:.2f})"
+                    )
+            
+            self._llm_response = full_response
             self._llm_tokens_used = {"prompt": 0, "completion": completion_tokens}
             
             # Track LLM completion time
@@ -929,6 +1005,10 @@ class TurnController:
             except asyncio.QueueEmpty:
                 break
         
+        # Clear transcript buffer to start fresh for new turn
+        self.transcript_buffer.clear()
+        logger.info("🧹 Cleared transcript buffer after SPEAKING interrupt")
+        
         # Force Deepgram to finalize any pending transcripts
         await self.deepgram.finish_utterance()
         
@@ -1116,6 +1196,13 @@ class TurnController:
         self._llm_response = ""
         self._turn_start_time = None
         
+        # Reset ALL timing variables (fix bug where old timestamps persist across turns)
+        self._speech_end_time = None
+        self._llm_start_time = None
+        self._llm_complete_time = None
+        self._tts_start_time = None
+        self._first_audio_time = None
+        
         # Cancel and reset RAG retrieval task
         if self._rag_retrieval_task and not self._rag_retrieval_task.done():
             self._rag_retrieval_task.cancel()
@@ -1211,15 +1298,28 @@ class TurnController:
     
     async def _retrieve_with_timeout(self, query: str) -> list:
         """
-        Retrieve relevant documents with timeout.
+        Retrieve relevant documents with timeout and guardrail validation.
         
         Args:
             query: User query text
             
         Returns:
-            List of relevant document chunks or empty list on timeout/error
+            List of relevant document chunks or empty list on timeout/error/violation
         """
         if not self._rag_retriever:
+            return []
+        
+        # Guardrail: Validate query before retrieval
+        query_validation = self._rag_guardrails.validate_query(query)
+        if not query_validation.passed:
+            logger.warning(f"🛡️ Query blocked by guardrails: {query_validation.violation}")
+            # Send safe fallback response to user
+            fallback = self._rag_guardrails.create_safe_fallback_response(query_validation.violation)
+            await self.on_error(
+                f"guardrail_{query_validation.violation.value}",
+                fallback,
+                recoverable=True
+            )
             return []
         
         try:
@@ -1228,6 +1328,32 @@ class TurnController:
                 session_id=self.session_id,
                 timeout_ms=settings.rag_timeout_ms
             )
+            
+            # Guardrail: Validate retrieval results
+            # Note: Retriever already applied adaptive thresholds and marked summary queries
+            if results:
+                max_score = max([r.get('score', 0) for r in results], default=0)
+                
+                # Get is_summary_query from retriever metadata (no duplicate detection!)
+                is_summary_query = results[0].get('_is_summary_query', False) if results else False
+                retriever_threshold = results[0].get('_min_threshold', 0.3) if results else 0.3
+                
+                # Guardrails use same threshold as retriever (0.05 for summary, 0.3 for normal)
+                # But slightly lower to allow results that passed retriever filters
+                adaptive_min_confidence = max(retriever_threshold - 0.01, 0.04)
+                
+                if max_score < adaptive_min_confidence:
+                    logger.warning(
+                        f"🛡️ Low confidence: {max_score:.2f} < {adaptive_min_confidence} "
+                        f"(summary={is_summary_query}, retriever_threshold={retriever_threshold:.2f})"
+                    )
+                    return []
+                
+                logger.info(
+                    f"✅ Guardrails passed: {len(results)} results, "
+                    f"max_score={max_score:.2f} >= {adaptive_min_confidence} (summary={is_summary_query})"
+                )
+            
             return results
         except Exception as e:
             logger.error(f"RAG retrieval failed: {e}")
