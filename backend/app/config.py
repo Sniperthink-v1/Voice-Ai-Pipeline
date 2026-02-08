@@ -145,6 +145,30 @@ class Settings(BaseSettings):
         description="Cancellation rate threshold for adaptive debounce"
     )
 
+    # Deepgram Flux Settings
+    use_flux: bool = Field(
+        default=True,
+        description="Use Deepgram Flux (low-latency English) instead of nova-3 (multilingual)"
+    )
+    flux_eager_eot_threshold: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=0.9,
+        description="Flux EagerEndOfTurn confidence threshold (lower=faster, more false starts)"
+    )
+    flux_eot_threshold: float = Field(
+        default=0.7,
+        ge=0.3,
+        le=0.95,
+        description="Flux EndOfTurn confidence threshold (higher=more reliable)"
+    )
+    flux_eot_timeout_ms: int = Field(
+        default=5000,
+        ge=500,
+        le=15000,
+        description="Flux max silence before forcing EndOfTurn"
+    )
+
     # Server Settings
     host: str = Field(
         default="0.0.0.0",

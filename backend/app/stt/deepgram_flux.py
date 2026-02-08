@@ -66,6 +66,9 @@ class DeepgramFluxClient:
 
         self.ws: Optional[WebSocketClientProtocol] = None
         self.is_connected = False
+        self._audio_chunks_sent = 0  # Diagnostic counter
+        self._audio_flowing = False  # True once first audio chunk is sent
+        self._last_final_turn_index = -1  # Track which turn index we already sent as final
         self.is_closing = False
         self._receive_task: Optional[asyncio.Task] = None
         self._send_task: Optional[asyncio.Task] = None
@@ -99,15 +102,14 @@ class DeepgramFluxClient:
 
         # Deepgram Flux configuration
         # CRITICAL: Must use /v2/listen endpoint and flux-general-en model
+        # Only these params are supported by Flux (v2 endpoint):
+        #   model, encoding, sample_rate, eot_threshold, eager_eot_threshold, eot_timeout_ms
+        # Do NOT send: interim_results, punctuate, smart_format, channels, language, diarize, etc.
         params = {
             "model": "flux-general-en",  # NOT nova-3!
             "encoding": "linear16",
             "sample_rate": 16000,
-            "channels": 1,
-            "interim_results": "true",
-            "punctuate": "true",
-            "smart_format": "true",
-            # Flux-specific parameters
+            # Flux-specific turn detection parameters
             "eot_threshold": eot_threshold,
             "eager_eot_threshold": eager_eot_threshold,  # Enables EagerEndOfTurn + TurnResumed events
             "eot_timeout_ms": eot_timeout_ms,
@@ -126,9 +128,13 @@ class DeepgramFluxClient:
             )
             self.is_connected = True
             self._reconnect_attempts = 0
+            self._audio_chunks_sent = 0  # Reset counter on reconnect
+            self._audio_flowing = False  # Reset flow tracking on reconnect
+            self._last_final_turn_index = -1  # Reset turn tracking on reconnect
             logger.info(
                 f"Connected to Deepgram Flux (eager_eot={eager_eot_threshold}, "
                 f"eot={eot_threshold}, timeout={eot_timeout_ms}ms)"
+                f" | URL: {url}"
             )
 
             # Start receiving messages
@@ -199,18 +205,15 @@ class DeepgramFluxClient:
 
     async def finish_utterance(self):
         """
-        Send FinishUtterance control message to force Flux to finalize any pending transcripts.
+        No-op for Flux v2 — FinishUtterance is not supported.
         
-        Use this after interruptions or when resetting to ensure clean transcript boundaries.
+        Flux v2 only accepts 'CloseStream' as a control message.
+        Turn detection is handled natively by EagerEndOfTurn/EndOfTurn events,
+        so there's no need to force-finalize transcripts after interruptions.
         """
-        if not self.is_connected or not self.ws:
-            return
-            
-        try:
-            await self.ws.send(json.dumps({"type": "FinishUtterance"}))
-            logger.info("Sent FinishUtterance to Deepgram Flux")
-        except Exception as e:
-            logger.error(f"Error sending FinishUtterance: {e}")
+        # Flux v2 rejects FinishUtterance with UNPARSABLE_CLIENT_MESSAGE error
+        # and closes the connection. Just skip it.
+        logger.debug("finish_utterance() called — no-op for Flux v2")
 
     async def _send_loop(self):
         """
@@ -229,6 +232,12 @@ class DeepgramFluxClient:
                     
                     if self.ws and self.is_connected:
                         await self.ws.send(audio_data)
+                        self._audio_chunks_sent += 1
+                        if self._audio_chunks_sent == 1:
+                            self._audio_flowing = True
+                            logger.info(f"📤 First audio chunk sent to Flux: {len(audio_data)} bytes")
+                        elif self._audio_chunks_sent % 100 == 0:
+                            logger.debug(f"📤 Audio chunks sent to Flux: {self._audio_chunks_sent}")
                         
                 except asyncio.TimeoutError:
                     # No audio for 5 seconds - this is normal during silence
@@ -257,7 +266,11 @@ class DeepgramFluxClient:
         try:
             while not self.is_closing and self.ws:
                 try:
-                    message = await asyncio.wait_for(self.ws.recv(), timeout=30.0)
+                    # Use longer timeout before audio starts flowing (connection may
+                    # be pre-warmed well before user speaks). Once audio is flowing,
+                    # use shorter timeout to detect dead connections quickly.
+                    recv_timeout = 30.0 if self._audio_flowing else 120.0
+                    message = await asyncio.wait_for(self.ws.recv(), timeout=recv_timeout)
                     await self._process_message(message)
                     
                 except asyncio.TimeoutError:
@@ -279,24 +292,28 @@ class DeepgramFluxClient:
                 await self._handle_connection_error(e)
 
     async def _process_message(self, message: str):
-        """Process incoming message from Deepgram Flux."""
+        """
+        Process incoming message from Deepgram Flux.
+        
+        Flux v2 sends all transcription data as 'TurnInfo' messages with an 'event'
+        field that discriminates the event type:
+          - Update: Ongoing partial transcript (display in UI)
+          - StartOfTurn: Speech detected
+          - EagerEndOfTurn: Likely end of turn → trigger speculative LLM
+          - TurnResumed: User continued speaking → cancel speculation
+          - EndOfTurn: Confirmed end of turn → commit response
+        """
         try:
             data = json.loads(message)
             msg_type = data.get("type", "")
 
-            if msg_type == "Results":
-                await self._handle_results(data)
-            elif msg_type == "EagerEndOfTurn":
-                await self._handle_eager_end_of_turn(data)
-            elif msg_type == "TurnResumed":
-                await self._handle_turn_resumed(data)
-            elif msg_type == "EndOfTurn":
-                await self._handle_end_of_turn(data)
+            if msg_type == "TurnInfo":
+                await self._handle_turn_info(data)
             elif msg_type == "Metadata":
                 logger.debug(f"Flux metadata: {data}")
             elif msg_type == "Error":
                 error_msg = data.get("message", "Unknown error")
-                logger.error(f"Flux error: {error_msg}")
+                logger.error(f"Flux error: {error_msg} | Full payload: {json.dumps(data)}")
                 if self.on_error:
                     await self.on_error(error_msg)
             else:
@@ -307,12 +324,78 @@ class DeepgramFluxClient:
         except Exception as e:
             logger.error(f"Error processing Flux message: {e}")
 
-    async def _handle_results(self, data: dict):
+    def _extract_confidence(self, data: dict) -> float:
+        """Extract average word confidence from TurnInfo words array."""
+        words = data.get("words", [])
+        if not words:
+            return 0.9  # Default confidence when no words present
+        confidences = [w.get("confidence", 0.0) for w in words if "confidence" in w]
+        return sum(confidences) / len(confidences) if confidences else 0.9
+
+    async def _handle_turn_info(self, data: dict):
         """
-        Handle transcription results from Flux.
+        Route TurnInfo messages based on their event type.
         
-        Results contain partial and final transcripts with word-level confidence.
+        TurnInfo payload structure:
+          type: "TurnInfo"
+          event: "Update" | "StartOfTurn" | "EagerEndOfTurn" | "TurnResumed" | "EndOfTurn"
+          turn_index: int
+          transcript: str (cumulative transcript for this turn)
+          words: [{word, start, end, confidence}, ...]
+          audio_window_start / audio_window_end: float
         """
+        event = data.get("event", "")
+        transcript = data.get("transcript", "").strip()
+        turn_index = data.get("turn_index", 0)
+        confidence = self._extract_confidence(data)
+
+        if event == "Update":
+            # Ongoing partial transcript — send to UI for display
+            if transcript:
+                logger.debug(f"Flux partial [turn {turn_index}]: '{transcript[:60]}'")
+                await self.on_partial_transcript(transcript, confidence)
+
+        elif event == "StartOfTurn":
+            logger.info(f"🎙️ Flux StartOfTurn [turn {turn_index}]: '{transcript[:60]}'")
+            # Treat as partial — speech just started
+            if transcript:
+                await self.on_partial_transcript(transcript, confidence)
+
+        elif event == "EagerEndOfTurn":
+            logger.info(
+                f"🚀 Flux EagerEndOfTurn [turn {turn_index}]: '{transcript[:60]}' "
+                f"(confidence: {confidence:.2f}) - Starting speculative LLM"
+            )
+            # Send as final transcript (adds to buffer + starts RAG), then trigger speculative LLM
+            if transcript and turn_index > self._last_final_turn_index:
+                self._last_final_turn_index = turn_index
+                await self.on_final_transcript(transcript, confidence)
+            await self.on_eager_end_of_turn(transcript, confidence)
+
+        elif event == "TurnResumed":
+            logger.info("🔄 Flux TurnResumed: User continued speaking - cancelling speculative LLM")
+            # Reset the final tracking so EndOfTurn can re-send updated transcript
+            if turn_index == self._last_final_turn_index:
+                self._last_final_turn_index = turn_index - 1
+            await self.on_turn_resumed()
+
+        elif event == "EndOfTurn":
+            logger.info(
+                f"✅ Flux EndOfTurn [turn {turn_index}]: '{transcript[:60]}' "
+                f"(confidence: {confidence:.2f}) - Confirming turn completion"
+            )
+            # If EagerEndOfTurn didn't fire for this turn, send final transcript now
+            if transcript and turn_index > self._last_final_turn_index:
+                self._last_final_turn_index = turn_index
+                await self.on_final_transcript(transcript, confidence)
+            await self.on_end_of_turn(transcript, confidence)
+
+        else:
+            logger.debug(f"Unknown TurnInfo event: {event}")
+
+    # Legacy handlers kept for backwards compatibility but no longer called by _process_message
+    async def _handle_results(self, data: dict):
+        """Handle transcription results (legacy v1 format — not used by Flux v2)."""
         channel = data.get("channel", {})
         alternatives = channel.get("alternatives", [])
         
@@ -327,7 +410,6 @@ class DeepgramFluxClient:
         if not transcript:
             return
 
-        # Dispatch to appropriate callback
         if is_final:
             logger.debug(f"Flux final: '{transcript}' (confidence: {confidence:.2f})")
             await self.on_final_transcript(transcript, confidence)
@@ -336,15 +418,7 @@ class DeepgramFluxClient:
             await self.on_partial_transcript(transcript, confidence)
 
     async def _handle_eager_end_of_turn(self, data: dict):
-        """
-        Handle EagerEndOfTurn event from Flux.
-        
-        This signals that the user is LIKELY finishing their turn, but may continue.
-        Perfect for triggering SPECULATIVE state - start LLM generation but hold output.
-        
-        If user continues speaking, TurnResumed event will follow.
-        """
-        # Get the transcript that triggered the eager event
+        """Handle EagerEndOfTurn (legacy v1 format — not used by Flux v2)."""
         channel = data.get("channel", {})
         alternatives = channel.get("alternatives", [])
         
@@ -362,27 +436,12 @@ class DeepgramFluxClient:
             logger.warning("EagerEndOfTurn received without transcript")
 
     async def _handle_turn_resumed(self, data: dict):
-        """
-        Handle TurnResumed event from Flux.
-        
-        This means user continued speaking after EagerEndOfTurn was fired.
-        Cancel any speculative LLM processing immediately.
-        
-        This is EXPECTED behavior and should happen 30-50% of the time with
-        balanced eager_eot_threshold settings.
-        """
+        """Handle TurnResumed (legacy v1 format — not used by Flux v2)."""
         logger.info("🔄 Flux TurnResumed: User continued speaking - cancelling speculative LLM")
         await self.on_turn_resumed()
 
     async def _handle_end_of_turn(self, data: dict):
-        """
-        Handle EndOfTurn event from Flux.
-        
-        This is the CONFIRMED end of user's turn. User has stopped speaking
-        according to eot_threshold confidence or eot_timeout_ms elapsed.
-        
-        Transition SPECULATIVE → COMMITTED (if LLM response ready)
-        """
+        """Handle EndOfTurn (legacy v1 format — not used by Flux v2)."""
         channel = data.get("channel", {})
         alternatives = channel.get("alternatives", [])
         
@@ -420,3 +479,15 @@ class DeepgramFluxClient:
         await asyncio.sleep(delay)
 
         await self.connect()
+
+    @property
+    def connection_status(self) -> str:
+        """Get current connection status (matches DeepgramClient interface)."""
+        if self.is_closing:
+            return "closing"
+        elif self.is_connected:
+            return "connected"
+        elif self._reconnect_attempts > 0:
+            return "reconnecting"
+        else:
+            return "disconnected"

@@ -14,11 +14,12 @@ Critical: Input is conservative (buffered), output is aggressive (streamed/inter
 
 import asyncio
 import logging
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable, Awaitable, Union
 from datetime import datetime
 
 from app.state_machine import StateMachine, TurnState
 from app.stt.deepgram import DeepgramClient
+from app.stt.deepgram_flux import DeepgramFluxClient
 from app.llm.openai_client import OpenAIClient
 from app.tts.elevenlabs import ElevenLabsClient
 from app.orchestration.transcript_buffer import TranscriptBuffer
@@ -84,16 +85,23 @@ class TurnController:
             "Do NOT repeat or restate previous assistant replies."
         )
 
+        # Flux mode flag (Flux = low-latency English, nova-3 = multilingual fallback)
+        self._use_flux = settings.use_flux
+
         # External clients (initialized on start)
-        self.deepgram: Optional[DeepgramClient] = None
+        self.deepgram: Optional[Union[DeepgramClient, DeepgramFluxClient]] = None
         self.openai = OpenAIClient()
         self.elevenlabs = ElevenLabsClient()
 
-        # Silence timer
+        # Silence timer (used only in non-Flux mode; Flux handles turn detection natively)
         self.silence_timer = SilenceTimer(
             on_silence_complete=self._on_silence_complete,
             initial_debounce_ms=400,
         )
+
+        # Flux-specific state: True once EndOfTurn confirms the turn, prevents
+        # stale partial transcripts from cancelling a confirmed turn
+        self._flux_turn_confirmed = False
 
         # Cancellation control
         self._llm_cancel_event = asyncio.Event()
@@ -143,14 +151,31 @@ class TurnController:
 
     async def start(self):
         """Initialize external connections and pre-warm OpenAI."""
-        # Connect to Deepgram
-        self.deepgram = DeepgramClient(
-            on_partial_transcript=self._handle_partial_transcript,
-            on_final_transcript=self._handle_final_transcript,
-            on_error=self._handle_stt_error,
-        )
-        
-        success = await self.deepgram.connect()
+        # Connect to Deepgram (Flux for English low-latency, nova-3 for multilingual)
+        if self._use_flux:
+            logger.info("🚀 Using Deepgram Flux (low-latency English mode)")
+            self.deepgram = DeepgramFluxClient(
+                on_partial_transcript=self._handle_partial_transcript,
+                on_final_transcript=self._handle_flux_final_transcript,
+                on_eager_end_of_turn=self._on_eager_end_of_turn,
+                on_turn_resumed=self._on_turn_resumed,
+                on_end_of_turn=self._on_end_of_turn_confirmed,
+                on_error=self._handle_stt_error,
+            )
+            success = await self.deepgram.connect(
+                eager_eot_threshold=settings.flux_eager_eot_threshold,
+                eot_threshold=settings.flux_eot_threshold,
+                eot_timeout_ms=settings.flux_eot_timeout_ms,
+            )
+        else:
+            logger.info("🌐 Using Deepgram nova-3 (multilingual mode)")
+            self.deepgram = DeepgramClient(
+                on_partial_transcript=self._handle_partial_transcript,
+                on_final_transcript=self._handle_final_transcript,
+                on_error=self._handle_stt_error,
+            )
+            success = await self.deepgram.connect()
+
         if not success:
             await self.on_error("DEEPGRAM_CONNECTION_FAILED", "Failed to connect to Deepgram", recoverable=True)
         
@@ -250,19 +275,29 @@ class TurnController:
         """
         current_state = self.state_machine.current_state
         
-        # If we're in LISTENING state and get a partial, user is still speaking
-        # → restart silence timer so we don't prematurely fire SPECULATIVE
+        # --- LISTENING state ---
         if current_state == TurnState.LISTENING:
-            if self.silence_timer.is_running():
+            if not self._use_flux and self.silence_timer.is_running():
+                # Non-Flux only: Restart silence timer since user is still speaking
                 logger.debug(f"Partial transcript during LISTENING - restarting silence timer: '{text[:40]}'")
                 self.silence_timer.start()
+            # Flux mode: No action needed — Flux handles turn detection natively
         
-        # If we're in SPECULATIVE state and get a NEW partial transcript,
-        # it means user started speaking again → cancel speculation
+        # --- SPECULATIVE state ---
         elif current_state == TurnState.SPECULATIVE:
-            logger.info(f"New speech detected during SPECULATIVE: '{text}' - cancelling LLM")
-            await self._cancel_speculation()
-            await self._transition_to_listening()
+            if self._use_flux:
+                # Flux mode: Don't cancel on partials — rely on TurnResumed event.
+                # Flux sends TurnResumed explicitly when user continues speaking.
+                # Partials may arrive slightly before TurnResumed, so avoid double-cancel.
+                if self._flux_turn_confirmed:
+                    logger.debug(f"Partial during SPECULATIVE (Flux, turn confirmed) - ignoring: '{text[:30]}'")
+                else:
+                    logger.debug(f"Partial during SPECULATIVE (Flux) - awaiting TurnResumed: '{text[:30]}'")
+            else:
+                # Non-Flux: Cancel speculation on any new speech
+                logger.info(f"New speech detected during SPECULATIVE: '{text}' - cancelling LLM")
+                await self._cancel_speculation()
+                await self._transition_to_listening()
         
         # If we're in COMMITTED state and get a NEW partial transcript,
         # user is speaking again → cancel TTS task and reset to IDLE
@@ -423,16 +458,173 @@ class TurnController:
             self.silence_timer.start()
             logger.debug(f"Silence timer started with FULL debounce ({self.silence_timer.get_current_debounce_ms()}ms) - phrase boundary only")
 
+    # =========================================================================
+    # Flux-specific callbacks
+    # =========================================================================
+
+    async def _handle_flux_final_transcript(self, text: str, confidence: float):
+        """
+        Handle final transcript from Deepgram Flux (no speech_final parameter).
+        
+        Flux final transcripts indicate a phrase boundary. Unlike nova-3, turn
+        detection is handled by EagerEndOfTurn / EndOfTurn events, so we do NOT
+        start a silence timer here. We accumulate text and kick off speculative
+        RAG retrieval so context is ready when EagerEOT triggers the LLM.
+        """
+        current_state = self.state_machine.current_state
+
+        # Handle interruptions identically to the non-Flux path
+        if current_state == TurnState.COMMITTED:
+            logger.info(f"User still speaking during COMMITTED (Flux): '{text[:50]}' - cancelling TTS")
+            if self._tts_task and not self._tts_task.done():
+                self._tts_cancel_event.set()
+                self._tts_task.cancel()
+                try:
+                    await self._tts_task
+                except asyncio.CancelledError:
+                    pass
+            while not self._sentence_queue.empty():
+                try:
+                    self._sentence_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            await self.state_machine.transition(
+                TurnState.IDLE, reason="User still speaking (Flux) - cancelling turn"
+            )
+            await self._notify_state_change(TurnState.COMMITTED, TurnState.IDLE)
+            self.transcript_buffer.unlock()
+            await self._transition_to_listening()
+            return
+
+        if current_state == TurnState.SPEAKING:
+            logger.info(f"User barge-in during SPEAKING (Flux): '{text[:50]}'")
+            await self._handle_interrupt()
+            return
+
+        if current_state != TurnState.LISTENING:
+            logger.warning(f"Flux final transcript in {current_state} state - ignoring")
+            return
+
+        # Accumulate text for LLM
+        self.transcript_buffer.add_final(text, confidence)
+        await self.on_transcript_final(text, confidence)
+
+        # Start speculative RAG retrieval (same optimization as non-Flux path).
+        # RAG runs in parallel during the time between final transcript and
+        # EagerEndOfTurn, so context is ready when we start the LLM.
+        if self._rag_enabled and self._rag_retriever:
+            if self._rag_retrieval_task and not self._rag_retrieval_task.done():
+                logger.debug("Cancelling previous speculative RAG (Flux query updated)")
+                self._rag_retrieval_task.cancel()
+                try:
+                    await self._rag_retrieval_task
+                except asyncio.CancelledError:
+                    pass
+            full_query = self.transcript_buffer.get_final_text()
+            logger.debug(f"🔍 Starting speculative RAG (Flux): {full_query[:50]}")
+            self._rag_retrieval_task = asyncio.create_task(
+                self._retrieve_with_timeout(full_query)
+            )
+        # NOTE: No silence timer — Flux handles turn detection natively via
+        # EagerEndOfTurn and EndOfTurn events.
+
+    async def _on_eager_end_of_turn(self, transcript: str, confidence: float):
+        """
+        Flux EagerEndOfTurn — user is LIKELY done talking. Start LLM speculatively.
+        
+        Maps to:  LISTENING → SPECULATIVE  (same as silence timer completing)
+        
+        If the user continues, Flux will send TurnResumed and we cancel.
+        If confirmed, Flux sends EndOfTurn and we lock in.
+        
+        This reuses _on_silence_complete() which already handles:
+          - RAG retrieval check/start
+          - LISTENING → SPECULATIVE transition
+          - Buffer locking
+          - LLM task creation
+        """
+        if self.state_machine.current_state != TurnState.LISTENING:
+            logger.debug(f"Flux EagerEOT in {self.state_machine.current_state} - ignoring")
+            return
+
+        logger.info(
+            f"🚀 Flux EagerEndOfTurn: '{transcript[:60]}' "
+            f"(confidence: {confidence:.2f}) - starting speculative LLM"
+        )
+        self._flux_turn_confirmed = False
+        # Reuse the existing silence-complete logic (handles RAG wait, transition, LLM start)
+        await self._on_silence_complete()
+
+    async def _on_turn_resumed(self):
+        """
+        Flux TurnResumed — user continued speaking after EagerEndOfTurn.
+        Cancel speculative LLM and return to LISTENING.
+        
+        This is EXPECTED behavior (target: 30-40% of turns). Do not log as error.
+        """
+        if self.state_machine.current_state != TurnState.SPECULATIVE:
+            logger.debug(f"Flux TurnResumed in {self.state_machine.current_state} - ignoring")
+            return
+
+        logger.info("🔄 Flux TurnResumed - cancelling speculative LLM")
+        await self._cancel_speculation()
+        # Transition back to LISTENING to capture the continued speech
+        await self._transition_to_listening()
+
+    async def _on_end_of_turn_confirmed(self, transcript: str, confidence: float):
+        """
+        Flux EndOfTurn — CONFIRMED end of user's turn. User definitely stopped.
+        
+        Two scenarios:
+        1. SPECULATIVE: EagerEOT already triggered LLM. Set _flux_turn_confirmed
+           so that stale partial transcripts won't cancel the turn. _run_llm()
+           handles SPECULATIVE → COMMITTED on first sentence internally.
+        2. LISTENING: EagerEOT never fired (threshold too high, short utterance).
+           Start LLM now via _on_silence_complete().
+        """
+        current = self.state_machine.current_state
+
+        if current == TurnState.SPECULATIVE:
+            # LLM is already running from EagerEOT — just confirm the turn
+            self._flux_turn_confirmed = True
+            logger.info(
+                f"✅ Flux EndOfTurn confirmed (SPECULATIVE): '{transcript[:50]}' "
+                f"(confidence: {confidence:.2f}) - LLM continues uninterrupted"
+            )
+        elif current == TurnState.LISTENING:
+            # No EagerEOT fired — start LLM now
+            logger.info(
+                f"✅ Flux EndOfTurn in LISTENING: '{transcript[:50]}' "
+                f"(confidence: {confidence:.2f}) - starting LLM (no eager trigger)"
+            )
+            await self._on_silence_complete()
+        elif current == TurnState.COMMITTED:
+            # Already committed (fast LLM path) — nothing to do
+            logger.debug("Flux EndOfTurn in COMMITTED - already committed")
+        elif current == TurnState.SPEAKING:
+            # Already speaking — nothing to do
+            logger.debug("Flux EndOfTurn in SPEAKING - already speaking")
+        else:
+            logger.debug(f"Flux EndOfTurn in {current} - no action")
+
+    # =========================================================================
+    # Silence timer callback (used in non-Flux mode, or as shared logic for Flux EagerEOT)
+    # =========================================================================
+
     async def _on_silence_complete(self):
         """
-        Called when silence timer completes (user stopped speaking).
+        Called when silence is confirmed (user stopped speaking).
+        
+        In non-Flux mode: Called by SilenceTimer after debounce completes.
+        In Flux mode: Called by _on_eager_end_of_turn or _on_end_of_turn_confirmed.
         
         Transitions LISTENING → SPECULATIVE and starts LLM.
         """
         current_state = self.state_machine.current_state
 
         if current_state != TurnState.LISTENING:
-            logger.warning(f"Silence timer fired in {current_state} state - ignoring")
+            source = "Flux EOT" if self._use_flux else "Silence timer"
+            logger.warning(f"{source} fired in {current_state} state - ignoring")
             return
 
         # Mark speech end time
@@ -987,10 +1179,17 @@ class TurnController:
         # Reset state
         await self._reset_to_idle("Turn complete")
 
-        # Adjust silence debounce
+        # Adjust silence debounce (non-Flux only — Flux uses threshold-based turn detection)
         if self._total_turns > 0:
             cancellation_rate = self._cancelled_turns / self._total_turns
-            self.silence_timer.adjust_debounce(cancellation_rate)
+            if not self._use_flux:
+                self.silence_timer.adjust_debounce(cancellation_rate)
+            else:
+                # Log cancellation rate for monitoring (useful for tuning eager_eot_threshold)
+                logger.info(
+                    f"📊 Flux cancellation rate: {cancellation_rate:.1%} "
+                    f"({self._cancelled_turns}/{self._total_turns} turns)"
+                )
 
     async def _handle_interrupt(self):
         """
@@ -1217,6 +1416,9 @@ class TurnController:
         self._tts_start_time = None
         self._first_audio_time = None
         
+        # Reset Flux-specific state
+        self._flux_turn_confirmed = False
+        
         # Cancel and reset RAG retrieval task
         if self._rag_retrieval_task and not self._rag_retrieval_task.done():
             self._rag_retrieval_task.cancel()
@@ -1243,13 +1445,19 @@ class TurnController:
         Update controller settings at runtime.
         
         Args:
-            silence_debounce_ms: New silence debounce duration
+            silence_debounce_ms: New silence debounce duration (non-Flux mode only)
             cancellation_threshold: New cancellation rate threshold
             adaptive_debounce_enabled: Enable/disable adaptive debounce
         """
         if silence_debounce_ms is not None:
-            self.silence_timer.set_debounce_ms(silence_debounce_ms)
-            logger.info(f"Silence debounce updated: {silence_debounce_ms}ms")
+            if self._use_flux:
+                logger.info(
+                    f"Silence debounce setting ignored in Flux mode "
+                    f"(Flux uses eager_eot_threshold={settings.flux_eager_eot_threshold})"
+                )
+            else:
+                self.silence_timer.set_debounce_ms(silence_debounce_ms)
+                logger.info(f"Silence debounce updated: {silence_debounce_ms}ms")
 
         # Additional settings can be implemented as needed
 
@@ -1267,8 +1475,15 @@ class TurnController:
         )
 
         return {
+            "stt_mode": "flux" if self._use_flux else "nova-3",
             "cancellation_rate": cancellation_rate,
-            "avg_debounce_ms": self.silence_timer.get_current_debounce_ms(),
+            "avg_debounce_ms": (
+                None if self._use_flux
+                else self.silence_timer.get_current_debounce_ms()
+            ),
+            "flux_eager_eot_threshold": (
+                settings.flux_eager_eot_threshold if self._use_flux else None
+            ),
             "turn_latency_ms": 0,  # TODO: Calculate from turn timing
             "total_turns": self._total_turns,
             "tokens_wasted": self._llm_tokens_used["completion"] if self._llm_cancel_event.is_set() else 0,

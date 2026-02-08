@@ -45,6 +45,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Min silence debounce: {settings.min_silence_debounce_ms}ms")
     logger.info(f"Max silence debounce: {settings.max_silence_debounce_ms}ms")
     logger.info(f"Cancellation threshold: {settings.cancellation_rate_threshold}")
+    logger.info(f"STT mode: {'Flux (low-latency English)' if settings.use_flux else 'nova-3 (multilingual)'}")
+    if settings.use_flux:
+        logger.info(f"Flux eager_eot_threshold: {settings.flux_eager_eot_threshold}")
+        logger.info(f"Flux eot_threshold: {settings.flux_eot_threshold}")
+        logger.info(f"Flux eot_timeout_ms: {settings.flux_eot_timeout_ms}ms")
     logger.info(f"RAG timeout: {settings.rag_timeout_ms}ms (from env)")
     logger.info(f"RAG settings: top_k={settings.rag_top_k}, min_similarity={settings.rag_min_similarity}")
     
