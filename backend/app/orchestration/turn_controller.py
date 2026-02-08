@@ -328,13 +328,18 @@ class TurnController:
         # Now process the transcript
         await self._handle_final_transcript(text, confidence=1.0)
 
-    async def _handle_final_transcript(self, text: str, confidence: float):
+    async def _handle_final_transcript(self, text: str, confidence: float, speech_final: bool = False):
         """
         Handle final transcript from Deepgram (LLM input).
         
         Args:
             text: Final transcript text
             confidence: STT confidence score
+            speech_final: True if Deepgram confirmed silence via utterance_end_ms.
+                When True, we use a much shorter debounce (100ms) since Deepgram
+                already waited 600ms of silence. When False (is_final only),
+                this is a phrase boundary and user may still be speaking,
+                so we use the full adaptive debounce (400-1200ms).
         """
         current_state = self.state_machine.current_state
 
@@ -406,9 +411,17 @@ class TurnController:
                 self._retrieve_with_timeout(full_query)
             )
         
-        # Start silence timer
-        self.silence_timer.start()
-        logger.debug("Silence timer started after final transcript")
+        # Start silence timer with duration based on speech_final flag
+        # speech_final=True: Deepgram already confirmed 600ms of silence via utterance_end_ms
+        #   → Use very short debounce (100ms) just for multi-utterance accumulation
+        # speech_final=False: Deepgram phrase boundary, user may still be mid-thought  
+        #   → Use full adaptive debounce (400-1200ms) to avoid cutting them off
+        if speech_final:
+            self.silence_timer.start(override_ms=100)
+            logger.debug(f"Silence timer started with SHORT debounce (100ms) - speech_final confirmed")
+        else:
+            self.silence_timer.start()
+            logger.debug(f"Silence timer started with FULL debounce ({self.silence_timer.get_current_debounce_ms()}ms) - phrase boundary only")
 
     async def _on_silence_complete(self):
         """

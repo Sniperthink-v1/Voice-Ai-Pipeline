@@ -31,7 +31,7 @@ class DeepgramClient:
     def __init__(
         self,
         on_partial_transcript: Callable[[str, float], Awaitable[None]],
-        on_final_transcript: Callable[[str, float], Awaitable[None]],
+        on_final_transcript: Callable[[str, float, bool], Awaitable[None]],
         on_error: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         """
@@ -39,7 +39,9 @@ class DeepgramClient:
 
         Args:
             on_partial_transcript: Callback for interim results (text, confidence)
-            on_final_transcript: Callback for final results (text, confidence)
+            on_final_transcript: Callback for final results (text, confidence, speech_final)
+                speech_final=True means utterance_end_ms silence elapsed (true end of speech)
+                speech_final=False means Deepgram phrase boundary (user may still be speaking)
             on_error: Optional callback for error handling
         """
         self.api_key = settings.deepgram_api_key
@@ -81,6 +83,7 @@ class DeepgramClient:
             "utterance_end_ms": 1000,
             "vad_events": "true",
             "diarize": "false",  # Single speaker assumed
+            "endpointing": 300,  # Fire speech_final after 300ms silence (controls when user "stops speaking")
         }
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"wss://api.deepgram.com/v1/listen?{query_string}"
@@ -280,8 +283,10 @@ class DeepgramClient:
 
         if is_final or speech_final:
             # Final transcript - send to buffer for LLM input
-            logger.debug(f"Final transcript: {transcript} (confidence: {confidence:.2f})")
-            await self.on_final_transcript(transcript, confidence)
+            # Pass speech_final flag so turn controller can use shorter debounce
+            # when Deepgram has already confirmed silence via utterance_end_ms
+            logger.debug(f"Final transcript: {transcript} (confidence: {confidence:.2f}, speech_final={speech_final})")
+            await self.on_final_transcript(transcript, confidence, speech_final)
         else:
             # Partial transcript - UI display only
             logger.debug(f"Partial transcript: {transcript} (confidence: {confidence:.2f})")

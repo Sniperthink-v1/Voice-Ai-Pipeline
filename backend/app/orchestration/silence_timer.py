@@ -46,20 +46,27 @@ class SilenceTimer:
 
         self._timer_task: Optional[asyncio.Task] = None
         self._is_running = False
+        self._override_ms: Optional[int] = None
 
-    def start(self):
+    def start(self, override_ms: Optional[int] = None):
         """
         Start the silence timer.
         
         If timer is already running, this restarts it (resets the countdown).
+        
+        Args:
+            override_ms: If provided, use this duration instead of current_debounce_ms.
+                Used for speech_final events where Deepgram already confirmed silence.
         """
         # Cancel existing timer if running
         if self._timer_task and not self._timer_task.done():
             self._timer_task.cancel()
 
         self._is_running = True
+        self._override_ms = override_ms
         self._timer_task = asyncio.create_task(self._run_timer())
-        logger.debug(f"Silence timer started: {self.current_debounce_ms}ms")
+        duration = override_ms if override_ms is not None else self.current_debounce_ms
+        logger.debug(f"Silence timer started: {duration}ms{' (override)' if override_ms else ''}")
 
     def cancel(self):
         """
@@ -144,7 +151,8 @@ class SilenceTimer:
         Waits for debounce period, then invokes callback if not cancelled.
         """
         try:
-            await asyncio.sleep(self.current_debounce_ms / 1000.0)
+            duration_ms = self._override_ms if self._override_ms is not None else self.current_debounce_ms
+            await asyncio.sleep(duration_ms / 1000.0)
             
             # Timer completed without cancellation
             # Check if still running (not cancelled during sleep)
